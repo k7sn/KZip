@@ -1,4 +1,5 @@
 use crate::search::{DualSearchCoordinator, EngineStatus, SearchQuery, SearchResponse};
+use crate::vfs::archive::{CompressOptions, ExtractOptions};
 use crate::vfs::local::LocalFsProvider;
 use crate::vfs::{DirectoryListing, DriveInfo};
 use crate::AppState;
@@ -6,7 +7,9 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tauri::State;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use tauri::{AppHandle, State};
 
 #[tauri::command]
 pub fn list_drives(state: State<'_, AppState>) -> Result<Vec<DriveInfo>, String> {
@@ -17,6 +20,33 @@ pub fn list_drives(state: State<'_, AppState>) -> Result<Vec<DriveInfo>, String>
 #[tauri::command]
 pub fn get_startup_paths() -> Result<String, String> {
     Ok(LocalFsProvider::default_home_or_c())
+}
+
+#[tauri::command]
+pub fn get_cpu_threads() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(4)
+}
+
+#[tauri::command]
+pub async fn pick_folder_native(initial_dir: Option<String>) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("Seleziona cartella");
+        if let Some(ref dir) = initial_dir {
+            let p = Path::new(dir);
+            if p.is_dir() {
+                dialog = dialog.set_directory(p);
+            } else if let Some(parent) = p.parent() {
+                if parent.is_dir() {
+                    dialog = dialog.set_directory(parent);
+                }
+            }
+        }
+        Ok(dialog.pick_folder().map(|p| p.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|e| format!("Errore apertura dialogo cartella: {}", e))?
 }
 
 #[tauri::command]
@@ -213,25 +243,46 @@ pub fn reload_archive_engine(state: State<'_, AppState>) -> Result<EngineStatus,
 }
 
 #[tauri::command]
-#[allow(non_snake_case)]
-pub fn compress_Selection(
-    sources: Vec<String>,
-    destination_archive: String,
-    state: State<'_, AppState>,
-) -> Result<usize, String> {
-    let vfs = state.vfs.read();
-    vfs.archive.compress_items_to(&sources, &destination_archive)
+pub fn cancel_archive_operation(state: State<'_, AppState>) -> Result<(), String> {
+    state.cancel_flag.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 #[tauri::command]
-pub fn extract_archive(
-    archive_path: String,
-    destination_dir: String,
+#[allow(non_snake_case)]
+pub async fn compress_Selection(
+    app: AppHandle,
+    options: CompressOptions,
     state: State<'_, AppState>,
 ) -> Result<usize, String> {
-    let vfs = state.vfs.read();
-    vfs.archive
-        .extract_archive_to(&archive_path, &destination_dir)
+    let vfs_arc = Arc::clone(&state.vfs);
+    let cancel_flag = Arc::clone(&state.cancel_flag);
+    cancel_flag.store(false, Ordering::SeqCst);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let vfs = vfs_arc.read();
+        vfs.archive.compress_items_with_options(&options, &app, cancel_flag)
+    })
+    .await
+    .map_err(|e| format!("Errore thread compressione: {}", e))?
+}
+
+#[tauri::command]
+pub async fn extract_archive(
+    app: AppHandle,
+    options: ExtractOptions,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let vfs_arc = Arc::clone(&state.vfs);
+    let cancel_flag = Arc::clone(&state.cancel_flag);
+    cancel_flag.store(false, Ordering::SeqCst);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let vfs = vfs_arc.read();
+        vfs.archive.extract_archive_with_options(&options, &app, cancel_flag)
+    })
+    .await
+    .map_err(|e| format!("Errore thread estrazione: {}", e))?
 }
 
 #[tauri::command]

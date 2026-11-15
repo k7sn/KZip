@@ -2,15 +2,18 @@ use super::local::LocalFsProvider;
 use super::{DirectoryListing, VfsEntry, VfsManager, VfsProvider};
 use libloading::os::windows::Library as WinLibrary;
 use libloading::Library;
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter};
 use winapi::shared::guiddef::GUID;
 use winapi::shared::minwindef::{ULONG, WORD};
 use winapi::shared::ntdef::HRESULT;
@@ -32,6 +35,7 @@ extern "system" {
 
 const S_OK: HRESULT = 0;
 const E_NOINTERFACE: HRESULT = -2147467262i32; // 0x80004002
+const E_ABORT: HRESULT = -2147467260i32; // 0x80004004
 const E_FAIL: HRESULT = -2147467259i32; // 0x80004005
 
 pub const IID_IUNKNOWN: GUID = GUID {
@@ -67,6 +71,27 @@ pub const IID_IOUTSTREAM: GUID = GUID {
     Data2: 0x40C1,
     Data3: 0x278A,
     Data4: [0x00, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00],
+};
+
+pub const IID_ICRYPTOGETTEXTPASSWORD: GUID = GUID {
+    Data1: 0x23170F69,
+    Data2: 0x40C1,
+    Data3: 0x278A,
+    Data4: [0x00, 0x00, 0x00, 0x05, 0x00, 0x10, 0x00, 0x00],
+};
+
+pub const IID_ICRYPTOGETTEXTPASSWORD2: GUID = GUID {
+    Data1: 0x23170F69,
+    Data2: 0x40C1,
+    Data3: 0x278A,
+    Data4: [0x00, 0x00, 0x00, 0x05, 0x00, 0x11, 0x00, 0x00],
+};
+
+pub const IID_ISETPROPERTIES: GUID = GUID {
+    Data1: 0x23170F69,
+    Data2: 0x40C1,
+    Data3: 0x278A,
+    Data4: [0x00, 0x00, 0x00, 0x06, 0x00, 0x03, 0x00, 0x00],
 };
 
 pub const IID_IINARCHIVE: GUID = GUID {
@@ -124,7 +149,158 @@ fn guid_eq(a: &GUID, b: &GUID) -> bool {
 }
 
 // ============================================================================
-// COM INTERFACES PER 7-ZIP (`IInArchive`, `IOutArchive`, `IInStream`, `IOutStream`)
+// STRUCT OPZIONI COMPRESSIONE, ESTRAZIONE E PROGRESSO REAL-TIME
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompressOptions {
+    pub sources: Vec<String>,
+    pub destination_archive: String,
+    pub format: String,
+    pub compression_level: u32,
+    pub method: String,
+    pub dictionary_size: String,
+    pub word_size: u32,
+    pub solid_block_size: String,
+    pub num_threads: u32,
+    pub split_volume_size: Option<String>,
+    pub extra_parameters: Option<String>,
+    pub update_mode: String,
+    pub path_mode: String,
+    pub create_sfx: bool,
+    pub compress_shared_files: bool,
+    pub delete_after_compression: bool,
+    pub password: Option<String>,
+    pub encryption_method: String,
+    pub encrypt_file_names: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractOptions {
+    pub archive_path: String,
+    pub destination_dir: String,
+    pub overwrite_mode: String,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressPayload {
+    pub operation: String,
+    pub archive_name: String,
+    pub current_file: String,
+    pub processed_bytes: u64,
+    pub total_bytes: u64,
+    pub percent: f64,
+    pub speed_mb_per_sec: f64,
+    pub elapsed_secs: u64,
+    pub eta_secs: u64,
+    pub status: String,
+    pub message: Option<String>,
+}
+
+pub struct ProgressReporter {
+    app: AppHandle,
+    operation: String,
+    archive_name: String,
+    total_bytes: AtomicU64,
+    processed_bytes: AtomicU64,
+    current_file: Mutex<String>,
+    start_instant: Instant,
+    last_emit: Mutex<Instant>,
+    pub cancel_flag: Arc<AtomicBool>,
+}
+
+impl ProgressReporter {
+    pub fn new(
+        app: AppHandle,
+        operation: &str,
+        archive_name: &str,
+        initial_total: u64,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Arc<Self> {
+        let now = Instant::now();
+        Arc::new(Self {
+            app,
+            operation: operation.to_string(),
+            archive_name: archive_name.to_string(),
+            total_bytes: AtomicU64::new(initial_total.max(1)),
+            processed_bytes: AtomicU64::new(0),
+            current_file: Mutex::new(String::new()),
+            start_instant: now,
+            last_emit: Mutex::new(now),
+            cancel_flag,
+        })
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_flag.load(Ordering::Relaxed)
+    }
+
+    pub fn set_total(&self, total: u64) {
+        self.total_bytes.store(total.max(1), Ordering::Relaxed);
+        self.emit_now("running", None, true);
+    }
+
+    pub fn set_current_file(&self, name: String) {
+        *self.current_file.lock() = name;
+        self.emit_now("running", None, false);
+    }
+
+    pub fn set_completed(&self, completed: u64) {
+        self.processed_bytes.store(completed, Ordering::Relaxed);
+        self.emit_now("running", None, false);
+    }
+
+    pub fn finish(&self, status: &str, message: Option<String>) {
+        if status == "completed" {
+            let tot = self.total_bytes.load(Ordering::Relaxed);
+            self.processed_bytes.store(tot, Ordering::Relaxed);
+        }
+        self.emit_now(status, message, true);
+    }
+
+    fn emit_now(&self, status: &str, message: Option<String>, force: bool) {
+        let now = Instant::now();
+        {
+            let mut last = self.last_emit.lock();
+            if !force && now.duration_since(*last).as_millis() < 45 {
+                return;
+            }
+            *last = now;
+        }
+
+        let tot = self.total_bytes.load(Ordering::Relaxed).max(1);
+        let proc_b = self.processed_bytes.load(Ordering::Relaxed).min(tot);
+        let pct = ((proc_b as f64 / tot as f64) * 100.0).clamp(0.0, 100.0);
+        let elapsed_f = self.start_instant.elapsed().as_secs_f64().max(0.001);
+        let speed_mb = (proc_b as f64 / (1024.0 * 1024.0)) / elapsed_f;
+        let remaining_bytes = tot.saturating_sub(proc_b);
+        let bytes_per_sec = (proc_b as f64 / elapsed_f).max(1.0);
+        let eta_secs = (remaining_bytes as f64 / bytes_per_sec) as u64;
+
+        let payload = ProgressPayload {
+            operation: self.operation.clone(),
+            archive_name: self.archive_name.clone(),
+            current_file: self.current_file.lock().clone(),
+            processed_bytes: proc_b,
+            total_bytes: tot,
+            percent: pct,
+            speed_mb_per_sec: speed_mb,
+            elapsed_secs: self.start_instant.elapsed().as_secs(),
+            eta_secs,
+            status: status.to_string(),
+            message,
+        };
+
+        let _ = self.app.emit("archive-progress", &payload);
+    }
+}
+
+// ============================================================================
+// COM INTERFACES PER 7-ZIP (`IInArchive`, `IOutArchive`, `ISetProperties`)
 // ============================================================================
 
 #[repr(C)]
@@ -210,6 +386,223 @@ pub struct IOutArchiveVtbl {
 #[repr(C)]
 pub struct IOutArchive {
     pub lp_vtbl: *const IOutArchiveVtbl,
+}
+
+#[repr(C)]
+pub struct ISetPropertiesVtbl {
+    pub query_interface: unsafe extern "system" fn(
+        this: *mut ISetProperties,
+        riid: *const GUID,
+        ppv_object: *mut *mut c_void,
+    ) -> HRESULT,
+    pub add_ref: unsafe extern "system" fn(this: *mut ISetProperties) -> ULONG,
+    pub release: unsafe extern "system" fn(this: *mut ISetProperties) -> ULONG,
+    pub set_properties: unsafe extern "system" fn(
+        this: *mut ISetProperties,
+        names: *const *const u16,
+        values: *const PROPVARIANT,
+        num_props: u32,
+    ) -> HRESULT,
+}
+
+#[repr(C)]
+pub struct ISetProperties {
+    pub lp_vtbl: *const ISetPropertiesVtbl,
+}
+
+// ============================================================================
+// TEAR-OFF COM PER `ICryptoGetTextPassword` & `ICryptoGetTextPassword2`
+// ============================================================================
+
+#[repr(C)]
+struct ICryptoGetTextPasswordVtbl {
+    query_interface: unsafe extern "system" fn(
+        this: *mut ComPasswordProvider,
+        riid: *const GUID,
+        ppv: *mut *mut c_void,
+    ) -> HRESULT,
+    add_ref: unsafe extern "system" fn(this: *mut ComPasswordProvider) -> ULONG,
+    release: unsafe extern "system" fn(this: *mut ComPasswordProvider) -> ULONG,
+    crypto_get_text_password: unsafe extern "system" fn(
+        this: *mut ComPasswordProvider,
+        password: *mut *mut u16,
+    ) -> HRESULT,
+}
+
+static PASSWORD_VTBL: ICryptoGetTextPasswordVtbl = ICryptoGetTextPasswordVtbl {
+    query_interface: pwd_qi,
+    add_ref: pwd_add_ref,
+    release: pwd_release,
+    crypto_get_text_password: pwd_get_text,
+};
+
+#[repr(C)]
+struct ComPasswordProvider {
+    vtbl: *const ICryptoGetTextPasswordVtbl,
+    ref_count: AtomicU32,
+    password: String,
+}
+
+impl ComPasswordProvider {
+    fn new_boxed(password: String) -> *mut Self {
+        Box::into_raw(Box::new(Self {
+            vtbl: &PASSWORD_VTBL,
+            ref_count: AtomicU32::new(1),
+            password,
+        }))
+    }
+}
+
+unsafe extern "system" fn pwd_qi(
+    this: *mut ComPasswordProvider,
+    riid: *const GUID,
+    ppv: *mut *mut c_void,
+) -> HRESULT {
+    if ppv.is_null() || riid.is_null() {
+        return E_FAIL;
+    }
+    let iid = &*riid;
+    if guid_eq(iid, &IID_IUNKNOWN) || guid_eq(iid, &IID_ICRYPTOGETTEXTPASSWORD) {
+        *ppv = this as *mut c_void;
+        pwd_add_ref(this);
+        S_OK
+    } else {
+        *ppv = null_mut();
+        E_NOINTERFACE
+    }
+}
+
+unsafe extern "system" fn pwd_add_ref(this: *mut ComPasswordProvider) -> ULONG {
+    let this_ref = &*this;
+    this_ref.ref_count.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+unsafe extern "system" fn pwd_release(this: *mut ComPasswordProvider) -> ULONG {
+    let prev = {
+        let this_ref = &*this;
+        this_ref.ref_count.fetch_sub(1, Ordering::Release)
+    };
+    if prev == 1 {
+        std::sync::atomic::fence(Ordering::Acquire);
+        drop(Box::from_raw(this));
+        0
+    } else {
+        prev - 1
+    }
+}
+
+unsafe extern "system" fn pwd_get_text(
+    this: *mut ComPasswordProvider,
+    password: *mut *mut u16,
+) -> HRESULT {
+    if password.is_null() {
+        return E_FAIL;
+    }
+    let this_ref = &*this;
+    let wide: Vec<u16> = this_ref.password.encode_utf16().collect();
+    *password = SysAllocStringLen(wide.as_ptr(), wide.len() as u32);
+    S_OK
+}
+
+#[repr(C)]
+struct ICryptoGetTextPassword2Vtbl {
+    query_interface: unsafe extern "system" fn(
+        this: *mut ComPasswordProvider2,
+        riid: *const GUID,
+        ppv: *mut *mut c_void,
+    ) -> HRESULT,
+    add_ref: unsafe extern "system" fn(this: *mut ComPasswordProvider2) -> ULONG,
+    release: unsafe extern "system" fn(this: *mut ComPasswordProvider2) -> ULONG,
+    crypto_get_text_password2: unsafe extern "system" fn(
+        this: *mut ComPasswordProvider2,
+        password_is_defined: *mut i32,
+        password: *mut *mut u16,
+    ) -> HRESULT,
+}
+
+static PASSWORD2_VTBL: ICryptoGetTextPassword2Vtbl = ICryptoGetTextPassword2Vtbl {
+    query_interface: pwd2_qi,
+    add_ref: pwd2_add_ref,
+    release: pwd2_release,
+    crypto_get_text_password2: pwd2_get_text,
+};
+
+#[repr(C)]
+struct ComPasswordProvider2 {
+    vtbl: *const ICryptoGetTextPassword2Vtbl,
+    ref_count: AtomicU32,
+    password: Option<String>,
+}
+
+impl ComPasswordProvider2 {
+    fn new_boxed(password: Option<String>) -> *mut Self {
+        Box::into_raw(Box::new(Self {
+            vtbl: &PASSWORD2_VTBL,
+            ref_count: AtomicU32::new(1),
+            password,
+        }))
+    }
+}
+
+unsafe extern "system" fn pwd2_qi(
+    this: *mut ComPasswordProvider2,
+    riid: *const GUID,
+    ppv: *mut *mut c_void,
+) -> HRESULT {
+    if ppv.is_null() || riid.is_null() {
+        return E_FAIL;
+    }
+    let iid = &*riid;
+    if guid_eq(iid, &IID_IUNKNOWN) || guid_eq(iid, &IID_ICRYPTOGETTEXTPASSWORD2) {
+        *ppv = this as *mut c_void;
+        pwd2_add_ref(this);
+        S_OK
+    } else {
+        *ppv = null_mut();
+        E_NOINTERFACE
+    }
+}
+
+unsafe extern "system" fn pwd2_add_ref(this: *mut ComPasswordProvider2) -> ULONG {
+    let this_ref = &*this;
+    this_ref.ref_count.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+unsafe extern "system" fn pwd2_release(this: *mut ComPasswordProvider2) -> ULONG {
+    let prev = {
+        let this_ref = &*this;
+        this_ref.ref_count.fetch_sub(1, Ordering::Release)
+    };
+    if prev == 1 {
+        std::sync::atomic::fence(Ordering::Acquire);
+        drop(Box::from_raw(this));
+        0
+    } else {
+        prev - 1
+    }
+}
+
+unsafe extern "system" fn pwd2_get_text(
+    this: *mut ComPasswordProvider2,
+    password_is_defined: *mut i32,
+    password: *mut *mut u16,
+) -> HRESULT {
+    if password_is_defined.is_null() || password.is_null() {
+        return E_FAIL;
+    }
+    let this_ref = &*this;
+    match this_ref.password.as_ref().filter(|s| !s.is_empty()) {
+        Some(pwd) => {
+            *password_is_defined = 1;
+            let wide: Vec<u16> = pwd.encode_utf16().collect();
+            *password = SysAllocStringLen(wide.as_ptr(), wide.len() as u32);
+        }
+        None => {
+            *password_is_defined = 0;
+            *password = SysAllocStringLen(null(), 0);
+        }
+    }
+    S_OK
 }
 
 // ============================================================================
@@ -565,15 +958,27 @@ pub struct ComExtractCallback {
     ref_count: AtomicU32,
     in_archive: *mut IInArchive,
     dest_dir: PathBuf,
+    overwrite_mode: String,
+    password: Option<String>,
+    reporter: Arc<ProgressReporter>,
 }
 
 impl ComExtractCallback {
-    pub fn new_boxed(in_archive: *mut IInArchive, dest_dir: PathBuf) -> *mut Self {
+    pub fn new_boxed(
+        in_archive: *mut IInArchive,
+        dest_dir: PathBuf,
+        overwrite_mode: String,
+        password: Option<String>,
+        reporter: Arc<ProgressReporter>,
+    ) -> *mut Self {
         Box::into_raw(Box::new(Self {
             vtbl: &EXTRACT_CALLBACK_VTBL,
             ref_count: AtomicU32::new(1),
             in_archive,
             dest_dir,
+            overwrite_mode,
+            password,
+            reporter,
         }))
     }
 }
@@ -590,6 +995,11 @@ unsafe extern "system" fn extract_cb_qi(
     if guid_eq(iid, &IID_IUNKNOWN) || guid_eq(iid, &IID_IARCHIVEEXTRACTCALLBACK) {
         *ppv = this as *mut c_void;
         extract_cb_add_ref(this);
+        S_OK
+    } else if guid_eq(iid, &IID_ICRYPTOGETTEXTPASSWORD) {
+        let this_ref = &*this;
+        let pwd = this_ref.password.clone().unwrap_or_default();
+        *ppv = ComPasswordProvider::new_boxed(pwd) as *mut c_void;
         S_OK
     } else {
         *ppv = null_mut();
@@ -617,16 +1027,28 @@ unsafe extern "system" fn extract_cb_release(this: *mut ComExtractCallback) -> U
 }
 
 unsafe extern "system" fn extract_cb_set_total(
-    _this: *mut ComExtractCallback,
-    _total: u64,
+    this: *mut ComExtractCallback,
+    total: u64,
 ) -> HRESULT {
+    let this_ref = &*this;
+    if this_ref.reporter.is_cancelled() {
+        return E_ABORT;
+    }
+    this_ref.reporter.set_total(total);
     S_OK
 }
 
 unsafe extern "system" fn extract_cb_set_completed(
-    _this: *mut ComExtractCallback,
-    _complete: *const u64,
+    this: *mut ComExtractCallback,
+    complete: *const u64,
 ) -> HRESULT {
+    let this_ref = &*this;
+    if this_ref.reporter.is_cancelled() {
+        return E_ABORT;
+    }
+    if !complete.is_null() {
+        this_ref.reporter.set_completed(*complete);
+    }
     S_OK
 }
 
@@ -640,21 +1062,36 @@ unsafe extern "system" fn extract_cb_get_stream(
         return E_FAIL;
     }
     *out_stream = null_mut();
+    let this_ref = &*this;
+    if this_ref.reporter.is_cancelled() {
+        return E_ABORT;
+    }
     if ask_extract_mode != 0 {
         return S_OK;
     }
 
-    let this_ref = &*this;
     let archive = this_ref.in_archive;
     let rel_path = read_archive_item_string(archive, index, KP_ID_PATH).unwrap_or_default();
     let is_dir = read_archive_item_bool(archive, index, KP_ID_IS_DIR);
 
+    this_ref.reporter.set_current_file(rel_path.clone());
+
     let sanitized = rel_path.replace('/', "\\").trim_start_matches('\\').to_string();
-    let full_target = this_ref.dest_dir.join(sanitized);
+    let mut full_target = this_ref.dest_dir.join(sanitized);
 
     if is_dir {
         let _ = fs::create_dir_all(&full_target);
         return S_OK;
+    }
+
+    if full_target.exists() {
+        match this_ref.overwrite_mode.as_str() {
+            "skip" => return S_OK,
+            "rename" => {
+                full_target = auto_rename_path(full_target);
+            }
+            _ => {} // overwrite
+        }
     }
 
     match ComFileOutStream::new_boxed(&full_target) {
@@ -667,17 +1104,27 @@ unsafe extern "system" fn extract_cb_get_stream(
 }
 
 unsafe extern "system" fn extract_cb_prepare_op(
-    _this: *mut ComExtractCallback,
+    this: *mut ComExtractCallback,
     _mode: i32,
 ) -> HRESULT {
-    S_OK
+    let this_ref = &*this;
+    if this_ref.reporter.is_cancelled() {
+        E_ABORT
+    } else {
+        S_OK
+    }
 }
 
 unsafe extern "system" fn extract_cb_set_op_res(
-    _this: *mut ComExtractCallback,
+    this: *mut ComExtractCallback,
     _res: i32,
 ) -> HRESULT {
-    S_OK
+    let this_ref = &*this;
+    if this_ref.reporter.is_cancelled() {
+        E_ABORT
+    } else {
+        S_OK
+    }
 }
 
 // ============================================================================
@@ -746,14 +1193,22 @@ pub struct ComUpdateCallback {
     vtbl: *const IArchiveUpdateCallbackVtbl,
     ref_count: AtomicU32,
     items: Vec<UpdateSourceItem>,
+    password: Option<String>,
+    reporter: Arc<ProgressReporter>,
 }
 
 impl ComUpdateCallback {
-    pub fn new_boxed(items: Vec<UpdateSourceItem>) -> *mut Self {
+    pub fn new_boxed(
+        items: Vec<UpdateSourceItem>,
+        password: Option<String>,
+        reporter: Arc<ProgressReporter>,
+    ) -> *mut Self {
         Box::into_raw(Box::new(Self {
             vtbl: &UPDATE_CALLBACK_VTBL,
             ref_count: AtomicU32::new(1),
             items,
+            password,
+            reporter,
         }))
     }
 }
@@ -770,6 +1225,15 @@ unsafe extern "system" fn update_cb_qi(
     if guid_eq(iid, &IID_IUNKNOWN) || guid_eq(iid, &IID_IARCHIVEUPDATECALLBACK) {
         *ppv = this as *mut c_void;
         update_cb_add_ref(this);
+        S_OK
+    } else if guid_eq(iid, &IID_ICRYPTOGETTEXTPASSWORD2) {
+        let this_ref = &*this;
+        *ppv = ComPasswordProvider2::new_boxed(this_ref.password.clone()) as *mut c_void;
+        S_OK
+    } else if guid_eq(iid, &IID_ICRYPTOGETTEXTPASSWORD) {
+        let this_ref = &*this;
+        let pwd = this_ref.password.clone().unwrap_or_default();
+        *ppv = ComPasswordProvider::new_boxed(pwd) as *mut c_void;
         S_OK
     } else {
         *ppv = null_mut();
@@ -797,26 +1261,42 @@ unsafe extern "system" fn update_cb_release(this: *mut ComUpdateCallback) -> ULO
 }
 
 unsafe extern "system" fn update_cb_set_total(
-    _this: *mut ComUpdateCallback,
-    _total: u64,
+    this: *mut ComUpdateCallback,
+    total: u64,
 ) -> HRESULT {
+    let this_ref = &*this;
+    if this_ref.reporter.is_cancelled() {
+        return E_ABORT;
+    }
+    this_ref.reporter.set_total(total);
     S_OK
 }
 
 unsafe extern "system" fn update_cb_set_completed(
-    _this: *mut ComUpdateCallback,
-    _complete: *const u64,
+    this: *mut ComUpdateCallback,
+    complete: *const u64,
 ) -> HRESULT {
+    let this_ref = &*this;
+    if this_ref.reporter.is_cancelled() {
+        return E_ABORT;
+    }
+    if !complete.is_null() {
+        this_ref.reporter.set_completed(*complete);
+    }
     S_OK
 }
 
 unsafe extern "system" fn update_cb_get_item_info(
-    _this: *mut ComUpdateCallback,
+    this: *mut ComUpdateCallback,
     _index: u32,
     new_data: *mut i32,
     new_props: *mut i32,
     index_in_archive: *mut u32,
 ) -> HRESULT {
+    let this_ref = &*this;
+    if this_ref.reporter.is_cancelled() {
+        return E_ABORT;
+    }
     if !new_data.is_null() {
         *new_data = 1;
     }
@@ -841,6 +1321,10 @@ unsafe extern "system" fn update_cb_get_property(
     std::ptr::write_bytes(value, 0, 1);
 
     let this_ref = &*this;
+    if this_ref.reporter.is_cancelled() {
+        return E_ABORT;
+    }
+
     let item = match this_ref.items.get(index as usize) {
         Some(it) => it,
         None => return E_FAIL,
@@ -890,10 +1374,16 @@ unsafe extern "system" fn update_cb_get_stream(
     }
     *in_stream = null_mut();
     let this_ref = &*this;
+    if this_ref.reporter.is_cancelled() {
+        return E_ABORT;
+    }
     let item = match this_ref.items.get(index as usize) {
         Some(it) => it,
         None => return E_FAIL,
     };
+    this_ref
+        .reporter
+        .set_current_file(item.archive_rel_path.clone());
     if item.is_dir {
         return S_OK;
     }
@@ -907,10 +1397,115 @@ unsafe extern "system" fn update_cb_get_stream(
 }
 
 unsafe extern "system" fn update_cb_set_op_res(
-    _this: *mut ComUpdateCallback,
+    this: *mut ComUpdateCallback,
     _op_res: i32,
 ) -> HRESULT {
-    S_OK
+    let this_ref = &*this;
+    if this_ref.reporter.is_cancelled() {
+        E_ABORT
+    } else {
+        S_OK
+    }
+}
+
+// ============================================================================
+// CONFIGURAZIONE PROPRIETÀ COM `ISetProperties`
+// ============================================================================
+
+unsafe fn apply_compression_properties(
+    out_archive: *mut IOutArchive,
+    opts: &CompressOptions,
+) {
+    let mut set_props_ptr: *mut c_void = null_mut();
+    let hr = ((*(*out_archive).lp_vtbl).query_interface)(
+        out_archive,
+        &IID_ISETPROPERTIES as *const GUID,
+        &mut set_props_ptr,
+    );
+    if hr != S_OK || set_props_ptr.is_null() {
+        return;
+    }
+
+    let set_props = set_props_ptr as *mut ISetProperties;
+    let mut wide_names: Vec<Vec<u16>> = Vec::new();
+    let mut prop_values: Vec<PROPVARIANT> = Vec::new();
+
+    let mut add_u32_prop = |name: &str, val: u32| {
+        wide_names.push(name.encode_utf16().chain(std::iter::once(0)).collect());
+        let mut pv: PROPVARIANT = std::mem::zeroed();
+        pv.vt = VT_UI4;
+        let payload = (&mut pv as *mut PROPVARIANT as *mut u8).add(8);
+        *(payload as *mut u32) = val;
+        prop_values.push(pv);
+    };
+
+    let mut add_bool_prop = |name: &str, val: bool| {
+        wide_names.push(name.encode_utf16().chain(std::iter::once(0)).collect());
+        let mut pv: PROPVARIANT = std::mem::zeroed();
+        pv.vt = VT_BOOL;
+        let payload = (&mut pv as *mut PROPVARIANT as *mut u8).add(8);
+        *(payload as *mut i16) = if val { -1 } else { 0 };
+        prop_values.push(pv);
+    };
+
+    let mut add_bstr_prop = |name: &str, val: &str| {
+        wide_names.push(name.encode_utf16().chain(std::iter::once(0)).collect());
+        let mut pv: PROPVARIANT = std::mem::zeroed();
+        pv.vt = VT_BSTR;
+        let w: Vec<u16> = val.encode_utf16().collect();
+        let bstr = SysAllocStringLen(w.as_ptr(), w.len() as u32);
+        let payload = (&mut pv as *mut PROPVARIANT as *mut u8).add(8);
+        *(payload as *mut *mut u16) = bstr;
+        prop_values.push(pv);
+    };
+
+    add_u32_prop("x", opts.compression_level);
+    if opts.num_threads > 0 {
+        add_u32_prop("mt", opts.num_threads);
+    }
+
+    let fmt = opts.format.to_ascii_lowercase();
+    if fmt == "7z" {
+        if !opts.method.is_empty() && opts.compression_level > 0 {
+            add_bstr_prop("0", &opts.method);
+        }
+        if !opts.dictionary_size.is_empty() && opts.compression_level > 0 {
+            add_bstr_prop("d", &opts.dictionary_size);
+        }
+        if opts.word_size > 0 && opts.compression_level > 0 {
+            add_u32_prop("fb", opts.word_size);
+        }
+        if !opts.solid_block_size.is_empty() {
+            add_bstr_prop("s", &opts.solid_block_size);
+        }
+        if opts.password.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+            add_bool_prop("he", opts.encrypt_file_names);
+        }
+    } else if fmt == "zip" {
+        if !opts.method.is_empty() {
+            add_bstr_prop("m", &opts.method);
+        }
+        if opts.password.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+            && !opts.encryption_method.is_empty()
+        {
+            add_bstr_prop("em", &opts.encryption_method);
+        }
+    }
+
+    let name_ptrs: Vec<*const u16> = wide_names.iter().map(|v| v.as_ptr()).collect();
+    if !name_ptrs.is_empty() {
+        let _ = ((*(*set_props).lp_vtbl).set_properties)(
+            set_props,
+            name_ptrs.as_ptr(),
+            prop_values.as_ptr(),
+            name_ptrs.len() as u32,
+        );
+    }
+
+    for pv in &mut prop_values {
+        let _ = PropVariantClear(pv);
+    }
+    ((*(*set_props).lp_vtbl).release)(set_props);
 }
 
 // ============================================================================
@@ -1112,7 +1707,7 @@ impl OsStrWideCompat for std::ffi::OsStr {
 }
 
 // ============================================================================
-// ARCHIVE VFS PROVIDER + OPERAZIONI COMPRESSIONE / ESTRAZIONE
+// ARCHIVE VFS PROVIDER + OPERAZIONI COMPRESSIONE / ESTRAZIONE CON PROGRESSO
 // ============================================================================
 
 pub struct ArchiveVfsProvider {
@@ -1162,9 +1757,9 @@ impl ArchiveVfsProvider {
             0x03
         } else if lower.ends_with(".tar") {
             0xEE
-        } else if lower.ends_with(".gz") || lower.ends_with(".tgz") {
+        } else if lower.ends_with(".gz") || lower.ends_with(".tgz") || lower.ends_with(".gzip") {
             0xEF
-        } else if lower.ends_with(".bz2") {
+        } else if lower.ends_with(".bz2") || lower.ends_with(".bzip2") {
             0x02
         } else if lower.ends_with(".xz") {
             0x0C
@@ -1243,7 +1838,12 @@ impl ArchiveVfsProvider {
         ))
     }
 
-    pub fn extract_archive_to(&self, archive_file: &str, dest_dir: &str) -> Result<usize, String> {
+    pub fn extract_archive_with_options(
+        &self,
+        opts: &ExtractOptions,
+        app: &AppHandle,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Result<usize, String> {
         let core = self.core.as_ref().ok_or_else(|| {
             format!(
                 "KZip.Core.dll non caricata.\nDiagnostica:\n{}",
@@ -1251,17 +1851,43 @@ impl ArchiveVfsProvider {
             )
         })?;
 
-        let archive_path = Path::new(archive_file);
-        let dest_path = PathBuf::from(dest_dir);
+        let archive_path = Path::new(&opts.archive_path);
+        let dest_path = PathBuf::from(&opts.destination_dir);
         fs::create_dir_all(&dest_path)
             .map_err(|e| format!("Impossibile creare cartella destinazione: {}", e))?;
+
+        let archive_label = archive_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| opts.archive_path.clone());
 
         unsafe {
             let (in_archive, stream_ptr) = Self::open_in_archive(core, archive_path)?;
             let mut num_items: u32 = 0;
             ((*(*in_archive).lp_vtbl).get_number_of_items)(in_archive, &mut num_items);
 
-            let cb_ptr = ComExtractCallback::new_boxed(in_archive, dest_path);
+            let mut total_unpacked: u64 = 0;
+            for idx in 0..num_items {
+                total_unpacked = total_unpacked
+                    .saturating_add(read_archive_item_u64(in_archive, idx, KP_ID_SIZE));
+            }
+
+            let reporter = ProgressReporter::new(
+                app.clone(),
+                "Estrazione",
+                &archive_label,
+                total_unpacked.max(1),
+                cancel_flag,
+            );
+
+            let cb_ptr = ComExtractCallback::new_boxed(
+                in_archive,
+                dest_path,
+                opts.overwrite_mode.clone(),
+                opts.password.clone(),
+                Arc::clone(&reporter),
+            );
+
             let hr = ((*(*in_archive).lp_vtbl).extract)(
                 in_archive,
                 null(),
@@ -1275,17 +1901,27 @@ impl ArchiveVfsProvider {
             ((*(*in_archive).lp_vtbl).release)(in_archive);
             file_in_stream_release(stream_ptr);
 
-            if hr != S_OK {
-                return Err(format!("Estrazione COM fallita (HRESULT: {:#X})", hr));
+            if hr == E_ABORT || reporter.is_cancelled() {
+                reporter.finish("cancelled", Some("Estrazione annullata dall'utente".to_string()));
+                return Err("Operazione di estrazione annullata.".to_string());
             }
+
+            if hr != S_OK {
+                let err_msg = format!("Estrazione COM fallita (HRESULT: {:#X})", hr);
+                reporter.finish("error", Some(err_msg.clone()));
+                return Err(err_msg);
+            }
+
+            reporter.finish("completed", None);
             Ok(num_items as usize)
         }
     }
 
-    pub fn compress_items_to(
+    pub fn compress_items_with_options(
         &self,
-        sources: &[String],
-        dest_archive: &str,
+        opts: &CompressOptions,
+        app: &AppHandle,
+        cancel_flag: Arc<AtomicBool>,
     ) -> Result<usize, String> {
         let core = self.core.as_ref().ok_or_else(|| {
             format!(
@@ -1295,20 +1931,34 @@ impl ArchiveVfsProvider {
         })?;
 
         let mut update_items = Vec::new();
-        for src in sources {
+        for src in &opts.sources {
             let p = PathBuf::from(src);
             if !p.exists() {
                 continue;
             }
             let base_parent = p.parent().unwrap_or_else(|| Path::new(""));
-            collect_update_items(&p, base_parent, &mut update_items)?;
+            collect_update_items(&p, base_parent, &opts.path_mode, &mut update_items)?;
         }
 
         if update_items.is_empty() {
             return Err("Nessun file valido selezionato per la compressione".to_string());
         }
 
-        let fmt_id = Self::detect_format_id(dest_archive);
+        let total_source_bytes: u64 = update_items.iter().map(|i| i.size).sum();
+        let archive_label = Path::new(&opts.destination_archive)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| opts.destination_archive.clone());
+
+        let reporter = ProgressReporter::new(
+            app.clone(),
+            "Compressione",
+            &archive_label,
+            total_source_bytes.max(1),
+            cancel_flag,
+        );
+
+        let fmt_id = Self::detect_format_id(&opts.destination_archive);
         let clsid = format_clsid(fmt_id);
 
         unsafe {
@@ -1319,28 +1969,38 @@ impl ArchiveVfsProvider {
                 &mut out_arch_ptr,
             );
             if hr != S_OK || out_arch_ptr.is_null() {
-                return Err(format!(
+                let msg = format!(
                     "Il formato selezionato non supporta la compressione (HRESULT: {:#X})",
                     hr
-                ));
+                );
+                reporter.finish("error", Some(msg.clone()));
+                return Err(msg);
             }
 
             let out_archive = out_arch_ptr as *mut IOutArchive;
-            let out_stream = match ComFileOutStream::new_boxed(Path::new(dest_archive)) {
+            apply_compression_properties(out_archive, opts);
+
+            let out_stream = match ComFileOutStream::new_boxed(Path::new(&opts.destination_archive))
+            {
                 Ok(s) => s,
                 Err(e) => {
                     ((*(*out_archive).lp_vtbl).release)(out_archive);
+                    reporter.finish("error", Some(e.clone()));
                     return Err(e);
                 }
             };
 
-            let total = update_items.len();
-            let cb_ptr = ComUpdateCallback::new_boxed(update_items);
+            let total_count = update_items.len();
+            let cb_ptr = ComUpdateCallback::new_boxed(
+                update_items,
+                opts.password.clone(),
+                Arc::clone(&reporter),
+            );
 
             let update_hr = ((*(*out_archive).lp_vtbl).update_items)(
                 out_archive,
                 out_stream as *mut c_void,
-                total as u32,
+                total_count as u32,
                 cb_ptr as *mut c_void,
             );
 
@@ -1348,14 +2008,34 @@ impl ArchiveVfsProvider {
             ((*(*out_archive).lp_vtbl).release)(out_archive);
             file_out_stream_release(out_stream);
 
-            if update_hr != S_OK {
-                return Err(format!(
-                    "Compressione COM fallita (HRESULT: {:#X})",
-                    update_hr
-                ));
+            if update_hr == E_ABORT || reporter.is_cancelled() {
+                let _ = fs::remove_file(&opts.destination_archive);
+                reporter.finish(
+                    "cancelled",
+                    Some("Compressione annullata dall'utente".to_string()),
+                );
+                return Err("Operazione di compressione annullata.".to_string());
             }
 
-            Ok(total)
+            if update_hr != S_OK {
+                let msg = format!("Compressione COM fallita (HRESULT: {:#X})", update_hr);
+                reporter.finish("error", Some(msg.clone()));
+                return Err(msg);
+            }
+
+            if opts.delete_after_compression {
+                for src in &opts.sources {
+                    let p = Path::new(src);
+                    if p.is_dir() {
+                        let _ = fs::remove_dir_all(p);
+                    } else if p.is_file() {
+                        let _ = fs::remove_file(p);
+                    }
+                }
+            }
+
+            reporter.finish("completed", None);
+            Ok(total_count)
         }
     }
 }
@@ -1363,15 +2043,26 @@ impl ArchiveVfsProvider {
 fn collect_update_items(
     current: &Path,
     base_root: &Path,
+    path_mode: &str,
     out: &mut Vec<UpdateSourceItem>,
 ) -> Result<(), String> {
     let meta = fs::metadata(current).map_err(|e| e.to_string())?;
     let is_dir = meta.is_dir();
-    let rel = current
-        .strip_prefix(base_root)
-        .unwrap_or(current)
-        .to_string_lossy()
-        .replace('\\', "/");
+
+    let rel = match path_mode {
+        "full" => current
+            .to_string_lossy()
+            .replace('\\', "/")
+            .split_once(':')
+            .map(|(_, rest)| rest.trim_start_matches('/').to_string())
+            .unwrap_or_else(|| current.to_string_lossy().replace('\\', "/")),
+        "absolute" => current.to_string_lossy().replace('\\', "/"),
+        _ => current
+            .strip_prefix(base_root)
+            .unwrap_or(current)
+            .to_string_lossy()
+            .replace('\\', "/"),
+    };
 
     let mtime_secs = meta
         .modified()
@@ -1400,10 +2091,33 @@ fn collect_update_items(
 
     if is_dir {
         for entry in fs::read_dir(current).map_err(|e| e.to_string())?.flatten() {
-            collect_update_items(&entry.path(), base_root, out)?;
+            collect_update_items(&entry.path(), base_root, path_mode, out)?;
         }
     }
     Ok(())
+}
+
+fn auto_rename_path(target: PathBuf) -> PathBuf {
+    if !target.exists() {
+        return target;
+    }
+    let parent = target.parent().unwrap_or_else(|| Path::new(""));
+    let stem = target
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let ext = target
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+
+    for i in 1..1000 {
+        let candidate = parent.join(format!("{}_{}{}", stem, i, ext));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    target
 }
 
 impl VfsProvider for ArchiveVfsProvider {

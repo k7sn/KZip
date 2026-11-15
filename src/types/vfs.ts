@@ -81,3 +81,46 @@ export interface EngineStatus {
   archiveFormatsCount: number;
   archiveLoadDiagnostics: string[];
 }
+
+export interface CompressOptions {
+  sources: string[];
+  destinationArchive: string;
+  format: string;
+  compressionLevel: number;
+  method: string;
+  dictionarySize: string;
+  wordSize: number;
+  solidBlockSize: string;
+  numThreads: number;
+  splitVolumeSize: string | null;
+  extraParameters: string | null;
+  updateMode: string;
+  pathMode: string;
+  createSfx: boolean;
+  compressSharedFiles: boolean;
+  deleteAfterCompression: boolean;
+  password: string | null;
+  encryptionMethod: string;
+  encryptFileNames: boolean;
+}
+
+export interface ExtractOptions {
+  archivePath: string;
+  destinationDir: string;
+  overwriteMode: string;
+  password: string | null;
+}
+
+export interface ProgressPayload {
+  operation: string;
+  archiveName: string;
+  currentFile: string;
+  processedBytes: number;
+  totalBytes: number;
+  percent: number;
+  speedMbPerSec: number;
+  elapsedSecs: number;
+  etaSecs: number;
+  status: "running" | "completed" | "cancelled" | "error";
+  message: string | null;
+}

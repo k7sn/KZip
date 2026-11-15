@@ -1,11 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
+  CompressOptions,
   DirectoryListing,
   DriveInfo,
   EngineStatus,
+  ExtractOptions,
   LayoutMode,
   PaneTab,
+  ProgressPayload,
   SearchQuery,
   SearchResponse,
   VfsEntry,
@@ -17,6 +21,8 @@ import { BottomBar } from "./components/BottomBar";
 import { QuickViewModal } from "./components/QuickViewModal";
 import { ThemeModal } from "./components/ThemeModal";
 import { ArchiveModal } from "./components/ArchiveModal";
+import { ExtractModal } from "./components/ExtractModal";
+import { ProgressModal } from "./components/ProgressModal";
 
 interface PaneState {
   tabs: PaneTab[];
@@ -74,6 +80,14 @@ export const App: React.FC = () => {
 
   const [themeModalOpen, setThemeModalOpen] = useState(false);
   const [archiveModalOpen, setArchiveModalOpen] = useState(false);
+  const [extractModalArchive, setExtractModalArchive] = useState<string | null>(
+    null
+  );
+
+  const [activeProgress, setActiveProgress] =
+    useState<ProgressPayload | null>(null);
+  const [progressMinimized, setProgressMinimized] = useState(false);
+
   const [quickViewData, setQuickViewData] = useState<{
     title: string;
     content: string;
@@ -135,7 +149,27 @@ export const App: React.FC = () => {
     []
   );
 
-  // Avvio intelligente: riparte dall'ultimo percorso salvato o da C:\Users\<utente>
+  // Ascolto eventi real-time di progresso compressione/estrazione da Rust
+  useEffect(() => {
+    let unlistenFn: (() => void) | null = null;
+    listen<ProgressPayload>("archive-progress", (event) => {
+      setActiveProgress(event.payload);
+      if (event.payload.status === "completed") {
+        setTimeout(() => {
+          setActiveProgress((cur) =>
+            cur?.status === "completed" ? null : cur
+          );
+          setProgressMinimized(false);
+        }, 900);
+      }
+    }).then((fn) => {
+      unlistenFn = fn;
+    });
+    return () => {
+      if (unlistenFn) unlistenFn();
+    };
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
@@ -160,7 +194,6 @@ export const App: React.FC = () => {
     })();
   }, [fetchDirectory]);
 
-  // Gestione Splitter Dual-Pane
   useEffect(() => {
     if (!isDraggingSplitter) return;
     const handleMove = (e: MouseEvent) => {
@@ -186,10 +219,6 @@ export const App: React.FC = () => {
         : leftPane
       : currentPaneState;
 
-  const activeTab =
-    currentPaneState.tabs.find((t) => t.id === currentPaneState.activeTabId) ||
-    currentPaneState.tabs[0];
-
   const refreshBothPanes = useCallback(async () => {
     const leftPath = leftPane.listing?.currentPath || leftPane.lastRealFolder;
     const rightPath =
@@ -207,7 +236,6 @@ export const App: React.FC = () => {
     fetchDirectory,
   ]);
 
-  // Ricerca istantanea stile Everything direttamente nel pannello attivo
   const runInstantSearch = useCallback(
     async (rawQuery: string) => {
       const q = rawQuery.trim();
@@ -235,7 +263,12 @@ export const App: React.FC = () => {
         console.error("Search error:", err);
       }
     },
-    [activePane, currentPaneState.lastRealFolder, searchScopeGlobal, fetchDirectory]
+    [
+      activePane,
+      currentPaneState.lastRealFolder,
+      searchScopeGlobal,
+      fetchDirectory,
+    ]
   );
 
   const handleSearchInputChange = (val: string) => {
@@ -385,47 +418,39 @@ export const App: React.FC = () => {
     }
   }, [currentPaneState.selectedPaths, refreshBothPanes]);
 
-  const handleExtractHere = useCallback(
-    async (entry?: VfsEntry) => {
-      const archivePath =
-        entry?.path || Array.from(currentPaneState.selectedPaths)[0];
-      if (!archivePath) {
-        alert("Seleziona prima un file archivio (.7z, .zip, .rar, .tar) da estrarre.");
-        return;
-      }
-      const destDir = currentPaneState.lastRealFolder;
-      try {
-        await invoke("extract_archive", {
-          archivePath,
-          destinationDir: destDir,
-        });
-        await refreshBothPanes();
-      } catch (err) {
-        alert(String(err));
-      }
-    },
-    [
-      currentPaneState.selectedPaths,
-      currentPaneState.lastRealFolder,
-      refreshBothPanes,
-    ]
-  );
-
-  const handleExtractToSubfolder = useCallback(
+  // Estrazione rapida "Estrai qui" (immediata con barra di progresso)
+  const handleExtractHereImmediate = useCallback(
     async (entry: VfsEntry) => {
-      const sep = currentPaneState.lastRealFolder.endsWith("\\") ? "" : "\\";
-      const destDir = `${currentPaneState.lastRealFolder}${sep}${entry.stem}`;
       try {
-        await invoke("extract_archive", {
+        const opts: ExtractOptions = {
           archivePath: entry.path,
-          destinationDir: destDir,
-        });
+          destinationDir: currentPaneState.lastRealFolder,
+          overwriteMode: "overwrite",
+          password: null,
+        };
+        await invoke("extract_archive", { options: opts });
         await refreshBothPanes();
       } catch (err) {
         alert(String(err));
       }
     },
     [currentPaneState.lastRealFolder, refreshBothPanes]
+  );
+
+  // Apre ExtractModal per scegliere cartella ("Sfoglia..."), opzioni e password
+  const handleOpenExtractModal = useCallback(
+    (entry?: VfsEntry) => {
+      const archivePath =
+        entry?.path || Array.from(currentPaneState.selectedPaths)[0];
+      if (!archivePath) {
+        alert(
+          "Seleziona prima un file archivio (.7z, .zip, .rar, .tar) da estrarre."
+        );
+        return;
+      }
+      setExtractModalArchive(archivePath);
+    },
+    [currentPaneState.selectedPaths]
   );
 
   useEffect(() => {
@@ -451,6 +476,7 @@ export const App: React.FC = () => {
       } else if (e.key === "Escape") {
         setThemeModalOpen(false);
         setArchiveModalOpen(false);
+        setExtractModalArchive(null);
         setQuickViewData(null);
       }
     };
@@ -489,9 +515,7 @@ export const App: React.FC = () => {
       fetchDirectory(pane, entry.path, true);
     } else {
       invoke<string>("read_file_preview", { path: entry.path })
-        .then((content) =>
-          setQuickViewData({ title: entry.name, content })
-        )
+        .then((content) => setQuickViewData({ title: entry.name, content }))
         .catch((err) => alert(String(err)));
     }
   };
@@ -553,7 +577,7 @@ export const App: React.FC = () => {
           }
           setArchiveModalOpen(true);
         }}
-        onExtractSelected={() => handleExtractHere()}
+        onExtractSelected={() => handleOpenExtractModal()}
         onNewFolder={handleNewFolderF7}
         onOpenTerminal={() => {
           invoke("open_in_terminal", {
@@ -625,8 +649,8 @@ export const App: React.FC = () => {
             onNavigate={(path) => fetchDirectory("left", path, true)}
             onOpenEntry={(entry) => handleOpenEntry("left", entry)}
             onCompressRequest={() => setArchiveModalOpen(true)}
-            onExtractHereRequest={(entry) => handleExtractHere(entry)}
-            onExtractToFolderRequest={(entry) => handleExtractToSubfolder(entry)}
+            onExtractHereRequest={(entry) => handleExtractHereImmediate(entry)}
+            onExtractToFolderRequest={(entry) => handleOpenExtractModal(entry)}
             onRenameRequest={(entry) => handleRenameEntry(entry)}
             onDeleteRequest={handleDeleteF8}
             onNewFolderRequest={handleNewFolderF7}
@@ -699,9 +723,11 @@ export const App: React.FC = () => {
                 onNavigate={(path) => fetchDirectory("right", path, true)}
                 onOpenEntry={(entry) => handleOpenEntry("right", entry)}
                 onCompressRequest={() => setArchiveModalOpen(true)}
-                onExtractHereRequest={(entry) => handleExtractHere(entry)}
+                onExtractHereRequest={(entry) =>
+                  handleExtractHereImmediate(entry)
+                }
                 onExtractToFolderRequest={(entry) =>
-                  handleExtractToSubfolder(entry)
+                  handleOpenExtractModal(entry)
                 }
                 onRenameRequest={(entry) => handleRenameEntry(entry)}
                 onDeleteRequest={handleDeleteF8}
@@ -729,18 +755,46 @@ export const App: React.FC = () => {
         <ArchiveModal
           defaultArchiveName={defaultArchiveBase}
           destinationDir={currentPaneState.lastRealFolder}
-          selectedCount={selectedArray.length}
+          sources={selectedArray}
           onClose={() => setArchiveModalOpen(false)}
-          onConfirmCompress={async (fullArchivePath) => {
+          onConfirmCompress={async (options) => {
             try {
-              await invoke("compress_Selection", {
-                sources: selectedArray,
-                destinationArchive: fullArchivePath,
-              });
+              await invoke("compress_Selection", { options });
               await refreshBothPanes();
             } catch (err) {
               alert(String(err));
             }
+          }}
+        />
+      )}
+
+      {extractModalArchive && (
+        <ExtractModal
+          archivePath={extractModalArchive}
+          defaultDestinationDir={currentPaneState.lastRealFolder}
+          onClose={() => setExtractModalArchive(null)}
+          onConfirmExtract={async (options) => {
+            try {
+              await invoke("extract_archive", { options });
+              await refreshBothPanes();
+            } catch (err) {
+              alert(String(err));
+            }
+          }}
+        />
+      )}
+
+      {activeProgress && (
+        <ProgressModal
+          progress={activeProgress}
+          minimized={progressMinimized}
+          onToggleMinimize={() => setProgressMinimized((v) => !v)}
+          onCancel={() => {
+            invoke("cancel_archive_operation").catch(() => {});
+          }}
+          onCloseFinished={() => {
+            setActiveProgress(null);
+            setProgressMinimized(false);
           }}
         />
       )}
