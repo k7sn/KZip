@@ -1,4 +1,5 @@
 use crate::search::{DualSearchCoordinator, EngineStatus, SearchQuery, SearchResponse};
+use crate::vfs::local::LocalFsProvider;
 use crate::vfs::{DirectoryListing, DriveInfo};
 use crate::AppState;
 use std::fs;
@@ -11,6 +12,11 @@ use tauri::State;
 pub fn list_drives(state: State<'_, AppState>) -> Result<Vec<DriveInfo>, String> {
     let vfs = state.vfs.read();
     Ok(vfs.local.list_drives())
+}
+
+#[tauri::command]
+pub fn get_startup_paths() -> Result<String, String> {
+    Ok(LocalFsProvider::default_home_or_c())
 }
 
 #[tauri::command]
@@ -32,6 +38,22 @@ pub fn create_directory(parent_path: String, folder_name: String) -> Result<Stri
     fs::create_dir_all(&target)
         .map_err(|e| format!("Errore creazione cartella '{}': {}", target.display(), e))?;
     Ok(target.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn rename_item(old_path: String, new_name: String) -> Result<String, String> {
+    let trimmed = new_name.trim();
+    if trimmed.is_empty() {
+        return Err("Il nuovo nome non può essere vuoto".to_string());
+    }
+    let src = Path::new(&old_path);
+    let parent = src
+        .parent()
+        .ok_or_else(|| "Percorso padre non valido".to_string())?;
+    let dst = parent.join(trimmed);
+    fs::rename(src, &dst)
+        .map_err(|e| format!("Impossibile rinominare in '{}': {}", dst.display(), e))?;
+    Ok(dst.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -122,7 +144,7 @@ pub fn move_items(sources: Vec<String>, destination_dir: String) -> Result<usize
 pub fn read_file_preview(path: String) -> Result<String, String> {
     let p = Path::new(&path);
     if !p.is_file() {
-        return Err("L'elemento selezionato non è un file regolare.".to_string());
+        return Err("L'elemento selezionato non è un file regolare sul disco.".to_string());
     }
     let mut file = fs::File::open(p).map_err(|e| format!("Impossibile aprire il file: {}", e))?;
     let mut buf = vec![0u8; 32 * 1024];
@@ -173,7 +195,43 @@ pub fn execute_search(
 pub fn get_engine_status(state: State<'_, AppState>) -> Result<EngineStatus, String> {
     let vfs = state.vfs.read();
     let coordinator = DualSearchCoordinator::new();
-    Ok(coordinator.probe_status(vfs.archive.is_loaded(), vfs.archive.supported_formats()))
+    Ok(coordinator.probe_status(
+        vfs.archive.is_loaded(),
+        vfs.archive.loaded_path(),
+        vfs.archive.supported_formats(),
+        vfs.archive.diagnostics.clone(),
+    ))
+}
+
+#[tauri::command]
+pub fn reload_archive_engine(state: State<'_, AppState>) -> Result<EngineStatus, String> {
+    {
+        let mut vfs = state.vfs.write();
+        vfs.reload_archive_dll();
+    }
+    get_engine_status(state)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn compress_Selection(
+    sources: Vec<String>,
+    destination_archive: String,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let vfs = state.vfs.read();
+    vfs.archive.compress_items_to(&sources, &destination_archive)
+}
+
+#[tauri::command]
+pub fn extract_archive(
+    archive_path: String,
+    destination_dir: String,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let vfs = state.vfs.read();
+    vfs.archive
+        .extract_archive_to(&archive_path, &destination_dir)
 }
 
 #[tauri::command]

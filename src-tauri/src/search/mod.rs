@@ -37,7 +37,9 @@ pub struct EngineStatus {
     pub everything_version: Option<String>,
     pub active_search_engine: String,
     pub archive_dll_loaded: bool,
+    pub archive_loaded_path: Option<String>,
     pub archive_formats_count: u32,
+    pub archive_load_diagnostics: Vec<String>,
 }
 
 pub struct DualSearchCoordinator {
@@ -72,7 +74,13 @@ impl DualSearchCoordinator {
         }
     }
 
-    pub fn probe_status(&self, archive_loaded: bool, archive_formats: u32) -> EngineStatus {
+    pub fn probe_status(
+        &self,
+        archive_loaded: bool,
+        archive_path: Option<String>,
+        archive_formats: u32,
+        diagnostics: Vec<String>,
+    ) -> EngineStatus {
         match self.client.probe_status() {
             Some(version) => EngineStatus {
                 everything_dll_loaded: true,
@@ -80,7 +88,9 @@ impl DualSearchCoordinator {
                 everything_version: Some(version),
                 active_search_engine: "Everything 1.5 Native Pipe/IPC (Pure Rust)".to_string(),
                 archive_dll_loaded: archive_loaded,
+                archive_loaded_path: archive_path,
                 archive_formats_count: archive_formats,
+                archive_load_diagnostics: diagnostics,
             },
             None => EngineStatus {
                 everything_dll_loaded: false,
@@ -88,7 +98,9 @@ impl DualSearchCoordinator {
                 everything_version: None,
                 active_search_engine: "Pure-Rust Parallel Fallback (ignore + regex)".to_string(),
                 archive_dll_loaded: archive_loaded,
+                archive_loaded_path: archive_path,
                 archive_formats_count: archive_formats,
+                archive_load_diagnostics: diagnostics,
             },
         }
     }

@@ -1,44 +1,68 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
-import { THEMES, ThemeId } from "./themes";
+import { BUILTIN_THEMES, KZipTheme, ThemeId } from "./themes";
 
 interface ThemeContextValue {
   themeId: ThemeId;
+  availableThemes: Record<string, KZipTheme>;
   setThemeId: (id: ThemeId) => void;
-  toggleTheme: () => void;
+  importCustomThemeJson: (jsonContent: string) => void;
 }
 
 const ThemeContext = createContext<ThemeContextValue>({
-  themeId: "commander-light",
+  themeId: "win11-light",
+  availableThemes: BUILTIN_THEMES,
   setThemeId: () => {},
-  toggleTheme: () => {},
+  importCustomThemeJson: () => {},
 });
 
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [customThemes, setCustomThemes] = useState<Record<string, KZipTheme>>(() => {
+    try {
+      const raw = localStorage.getItem("kzip.customThemes");
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const availableThemes = { ...BUILTIN_THEMES, ...customThemes };
+
   const [themeId, setThemeIdState] = useState<ThemeId>(() => {
-    const saved = localStorage.getItem("kzip.theme") as ThemeId | null;
-    return saved && THEMES[saved] ? saved : "commander-light";
+    const saved = localStorage.getItem("kzip.theme");
+    return saved && availableThemes[saved] ? saved : "win11-light";
   });
 
   useEffect(() => {
-    const theme = THEMES[themeId];
+    const theme = availableThemes[themeId] || BUILTIN_THEMES["win11-light"];
     const root = document.documentElement;
     Object.entries(theme.variables).forEach(([key, val]) => {
       root.style.setProperty(key, val);
     });
-    root.setAttribute("data-theme", themeId);
-    localStorage.setItem("kzip.theme", themeId);
-  }, [themeId]);
+    root.setAttribute("data-theme", theme.id);
+    localStorage.setItem("kzip.theme", theme.id);
+  }, [themeId, availableThemes]);
 
-  const setThemeId = (id: ThemeId) => setThemeIdState(id);
+  const setThemeId = (id: ThemeId) => {
+    if (availableThemes[id]) {
+      setThemeIdState(id);
+    }
+  };
 
-  const toggleTheme = () => {
-    setThemeIdState((prev) =>
-      prev === "commander-light" ? "frutiger-aero" : "commander-light"
-    );
+  const importCustomThemeJson = (jsonContent: string) => {
+    const parsed = JSON.parse(jsonContent) as KZipTheme;
+    if (!parsed.id || !parsed.name || !parsed.variables) {
+      throw new Error("Il file JSON deve contenere 'id', 'name' e 'variables'.");
+    }
+    const next = { ...customThemes, [parsed.id]: parsed };
+    setCustomThemes(next);
+    localStorage.setItem("kzip.customThemes", JSON.stringify(next));
+    setThemeIdState(parsed.id);
   };
 
   return (
-    <ThemeContext.Provider value={{ themeId, setThemeId, toggleTheme }}>
+    <ThemeContext.Provider
+      value={{ themeId, availableThemes, setThemeId, importCustomThemeJson }}
+    >
       {children}
     </ThemeContext.Provider>
   );

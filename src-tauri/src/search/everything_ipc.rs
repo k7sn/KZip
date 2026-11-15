@@ -24,59 +24,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_USER, WNDCLASSW,
 };
 
-// ============================================================================
-// COSTANTI E CODICI DA `Everything3.h`
-// ============================================================================
-
 pub const EVERYTHING3_OK: u32 = 0;
-pub const EVERYTHING3_ERROR_OUT_OF_MEMORY: u32 = 0xE0000001;
 pub const EVERYTHING3_ERROR_IPC_PIPE_NOT_FOUND: u32 = 0xE0000002;
 pub const EVERYTHING3_ERROR_DISCONNECTED: u32 = 0xE0000003;
-pub const EVERYTHING3_ERROR_INVALID_PARAMETER: u32 = 0xE0000004;
-pub const EVERYTHING3_ERROR_BAD_REQUEST: u32 = 0xE0000005;
-pub const EVERYTHING3_ERROR_CANCELLED: u32 = 0xE0000006;
-pub const EVERYTHING3_ERROR_PROPERTY_NOT_FOUND: u32 = 0xE0000007;
-pub const EVERYTHING3_ERROR_SERVER: u32 = 0xE0000008;
-pub const EVERYTHING3_ERROR_INVALID_COMMAND: u32 = 0xE0000009;
 pub const EVERYTHING3_ERROR_BAD_RESPONSE: u32 = 0xE000000A;
 
-pub const EVERYTHING3_SEARCH_FOLDERS_FIRST_ASCENDING: u32 = 0;
-pub const EVERYTHING3_SEARCH_FOLDERS_FIRST_ALWAYS: u32 = 1;
-pub const EVERYTHING3_SEARCH_FOLDERS_FIRST_NEVER: u32 = 2;
-pub const EVERYTHING3_SEARCH_FOLDERS_FIRST_DESCENDING: u32 = 3;
-
-pub const EVERYTHING3_PROPERTY_ID_NAME: u32 = 0;
-pub const EVERYTHING3_PROPERTY_ID_PATH: u32 = 1;
-pub const EVERYTHING3_PROPERTY_ID_SIZE: u32 = 2;
-pub const EVERYTHING3_PROPERTY_ID_EXTENSION: u32 = 3;
-pub const EVERYTHING3_PROPERTY_ID_TYPE: u32 = 4;
-pub const EVERYTHING3_PROPERTY_ID_DATE_MODIFIED: u32 = 5;
-pub const EVERYTHING3_PROPERTY_ID_DATE_CREATED: u32 = 6;
-pub const EVERYTHING3_PROPERTY_ID_DATE_ACCESSED: u32 = 7;
-pub const EVERYTHING3_PROPERTY_ID_ATTRIBUTES: u32 = 8;
-pub const EVERYTHING3_PROPERTY_ID_FULL_PATH: u32 = 240;
-
-pub const EVERYTHING3_PROPERTY_VALUE_TYPE_NULL: u32 = 0;
-pub const EVERYTHING3_PROPERTY_VALUE_TYPE_BYTE: u32 = 1;
-pub const EVERYTHING3_PROPERTY_VALUE_TYPE_WORD: u32 = 2;
-pub const EVERYTHING3_PROPERTY_VALUE_TYPE_DWORD: u32 = 3;
-pub const EVERYTHING3_PROPERTY_VALUE_TYPE_UINT64: u32 = 5;
-pub const EVERYTHING3_PROPERTY_VALUE_TYPE_PSTRING: u32 = 8;
-pub const EVERYTHING3_PROPERTY_VALUE_TYPE_PSTRING_STRING_REFERENCE: u32 = 10;
-pub const EVERYTHING3_PROPERTY_VALUE_TYPE_PSTRING_FOLDER_REFERENCE: u32 = 14;
-pub const EVERYTHING3_PROPERTY_VALUE_TYPE_PSTRING_FILE_OR_FOLDER_REFERENCE: u32 = 15;
-
-const PIPE_CMD_GET_IPC_PIPE_VERSION: u32 = 0;
 const PIPE_CMD_GET_MAJOR_VERSION: u32 = 1;
 const PIPE_CMD_GET_MINOR_VERSION: u32 = 2;
 const PIPE_CMD_GET_REVISION: u32 = 3;
 const PIPE_CMD_GET_BUILD_NUMBER: u32 = 4;
-const PIPE_CMD_IS_DB_LOADED: u32 = 5;
 const PIPE_CMD_QUERY2_PACKET: u32 = 18;
-
-// ============================================================================
-// COSTANTI E STRUCT BINARIE DA `everything_ipc.h` (#pragma pack(push, 1))
-// ============================================================================
 
 pub const EVERYTHING_WM_IPC: u32 = WM_USER;
 pub const EVERYTHING_IPC_GET_MAJOR_VERSION: usize = 0;
@@ -86,29 +43,11 @@ pub const EVERYTHING_IPC_GET_BUILD_NUMBER: usize = 3;
 pub const EVERYTHING_IPC_IS_DB_LOADED: usize = 401;
 
 pub const EVERYTHING_IPC_MATCHCASE: u32 = 0x00000001;
-pub const EVERYTHING_IPC_MATCHWHOLEWORD: u32 = 0x00000002;
-pub const EVERYTHING_IPC_MATCHPATH: u32 = 0x00000004;
 pub const EVERYTHING_IPC_REGEX: u32 = 0x00000008;
-pub const EVERYTHING_IPC_MATCHDIACRITICS: u32 = 0x00000010;
-pub const EVERYTHING_IPC_MATCHPREFIX: u32 = 0x00000020;
-pub const EVERYTHING_IPC_MATCHSUFFIX: u32 = 0x00000040;
-pub const EVERYTHING_IPC_IGNOREPUNCTUATION: u32 = 0x00000080;
-pub const EVERYTHING_IPC_IGNOREWHITESPACE: u32 = 0x00000100;
-
 pub const EVERYTHING_IPC_FOLDER: u32 = 0x00000001;
-pub const EVERYTHING_IPC_DRIVE: u32 = 0x00000002;
-pub const EVERYTHING_IPC_ROOT: u32 = 0x00000002;
 pub const EVERYTHING_IPC_ALLRESULTS: u32 = 0xFFFFFFFF;
-
-pub const EVERYTHING_IPC_COPYDATAQUERYW: usize = 2;
 pub const EVERYTHING_IPC_COPYDATA_QUERY2W: usize = 18;
-
 pub const EVERYTHING_IPC_SORT_NAME_ASCENDING: u32 = 1;
-pub const EVERYTHING_IPC_SORT_NAME_DESCENDING: u32 = 2;
-pub const EVERYTHING_IPC_SORT_SIZE_ASCENDING: u32 = 5;
-pub const EVERYTHING_IPC_SORT_SIZE_DESCENDING: u32 = 6;
-pub const EVERYTHING_IPC_SORT_DATE_MODIFIED_ASCENDING: u32 = 13;
-pub const EVERYTHING_IPC_SORT_DATE_MODIFIED_DESCENDING: u32 = 14;
 
 pub const EVERYTHING_IPC_QUERY2_REQUEST_NAME: u32 = 0x00000001;
 pub const EVERYTHING_IPC_QUERY2_REQUEST_PATH: u32 = 0x00000002;
@@ -125,16 +64,6 @@ pub const EVERYTHING_IPC_QUERY2_REQUEST_ATTRIBUTES: u32 = 0x00000100;
 pub struct Everything3PipeHeader {
     pub command_or_status: u32,
     pub payload_size: u32,
-}
-
-#[repr(C, packed)]
-#[derive(Debug, Copy, Clone)]
-pub struct EVERYTHING_IPC_QUERYW_HEADER {
-    pub reply_hwnd: u32,
-    pub reply_copydata_message: u32,
-    pub search_flags: u32,
-    pub offset: u32,
-    pub max_results: u32,
 }
 
 #[repr(C, packed)]
@@ -515,6 +444,13 @@ pub fn deserialize_list2_buffer(
                 .to_string();
         }
 
+        if path_part.is_empty() {
+            path_part = Path::new(&full_path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+        }
+
         if !passes_post_filters(&full_path, is_dir, size, params) {
             continue;
         }
@@ -528,6 +464,7 @@ pub fn deserialize_list2_buffer(
             stem,
             extension,
             path: full_path,
+            parent_dir: path_part,
             is_dir,
             is_parent: false,
             is_archive,
@@ -597,6 +534,7 @@ pub fn deserialize_list1_buffer(
             stem,
             extension,
             path: full_path,
+            parent_dir: path_part,
             is_dir,
             is_parent: false,
             is_archive,

@@ -15,6 +15,7 @@ pub struct VfsEntry {
     pub stem: String,
     pub extension: String,
     pub path: String,
+    pub parent_dir: String,
     pub is_dir: bool,
     pub is_parent: bool,
     pub is_archive: bool,
@@ -66,6 +67,10 @@ impl VfsManager {
             archive: ArchiveVfsProvider::new(),
             search: SearchVfsProvider::new(),
         }
+    }
+
+    pub fn reload_archive_dll(&mut self) {
+        self.archive = ArchiveVfsProvider::new();
     }
 
     pub fn list(&self, raw_path: &str) -> Result<DirectoryListing, String> {

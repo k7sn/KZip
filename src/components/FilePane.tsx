@@ -1,18 +1,23 @@
 import React, { useMemo, useRef, useState } from "react";
 import {
-  HardDrive,
-  Globe,
-  Cpu,
-  Folder,
-  FileText,
-  FileArchive,
-  Image as ImageIcon,
-  Film,
-  Music,
-  Code,
-  Star,
-  AlignJustify,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
   ChevronRight,
+  Code,
+  Copy,
+  Edit3,
+  FileArchive,
+  FileText,
+  Film,
+  Folder,
+  FolderOutput,
+  FolderPlus,
+  HardDrive,
+  Image as ImageIcon,
+  Music,
+  RefreshCw,
+  Trash2,
 } from "lucide-react";
 import {
   DirectoryListing,
@@ -33,6 +38,11 @@ interface FilePaneProps {
   onSelectTab: (tabId: string) => void;
   onAddTab: () => void;
   onCloseTab: (tabId: string) => void;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  onBack: () => void;
+  onForward: () => void;
+  onUp: () => void;
   listing: DirectoryListing | null;
   viewMode: ViewMode;
   showHidden: boolean;
@@ -40,6 +50,12 @@ interface FilePaneProps {
   onSelectionChange: (next: Set<string>) => void;
   onNavigate: (path: string) => void;
   onOpenEntry: (entry: VfsEntry) => void;
+  onCompressRequest: () => void;
+  onExtractHereRequest: (entry: VfsEntry) => void;
+  onExtractToFolderRequest: (entry: VfsEntry) => void;
+  onRenameRequest: (entry: VfsEntry) => void;
+  onDeleteRequest: () => void;
+  onNewFolderRequest: () => void;
 }
 
 export const FilePane: React.FC<FilePaneProps> = ({
@@ -51,6 +67,11 @@ export const FilePane: React.FC<FilePaneProps> = ({
   onSelectTab,
   onAddTab,
   onCloseTab,
+  canGoBack,
+  canGoForward,
+  onBack,
+  onForward,
+  onUp,
   listing,
   viewMode,
   showHidden,
@@ -58,14 +79,30 @@ export const FilePane: React.FC<FilePaneProps> = ({
   onSelectionChange,
   onNavigate,
   onOpenEntry,
+  onCompressRequest,
+  onExtractHereRequest,
+  onExtractToFolderRequest,
+  onRenameRequest,
+  onDeleteRequest,
+  onNewFolderRequest,
 }) => {
   const [sortField, setSortField] = useState<SortField>("name");
   const [sortAsc, setSortAsc] = useState<boolean>(true);
   const [focusedIndex, setFocusedIndex] = useState<number>(0);
   const [lastClickedIndex, setLastClickedIndex] = useState<number>(0);
+  const [editingPath, setEditingPath] = useState<boolean>(false);
+  const [pathInput, setPathInput] = useState<string>("");
+
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    entry: VfsEntry | null;
+  } | null>(null);
+
   const viewportRef = useRef<HTMLDivElement>(null);
 
   const currentPath = listing?.currentPath || "C:\\";
+  const isSearchMode = listing?.providerScheme === "search";
 
   const currentDrive = useMemo(() => {
     const matched = drives.find((d) =>
@@ -96,8 +133,15 @@ export const FilePane: React.FC<FilePaneProps> = ({
         case "name":
           cmp = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
           break;
+        case "path":
+          cmp = a.parentDir.localeCompare(b.parentDir, undefined, {
+            sensitivity: "base",
+          });
+          break;
         case "extension":
-          cmp = a.extension.localeCompare(b.extension, undefined, { sensitivity: "base" });
+          cmp = a.extension.localeCompare(b.extension, undefined, {
+            sensitivity: "base",
+          });
           break;
         case "size":
           cmp = a.size - b.size;
@@ -119,7 +163,15 @@ export const FilePane: React.FC<FilePaneProps> = ({
   }, [listing, showHidden, sortField, sortAsc]);
 
   const breadcrumbParts = useMemo(() => {
-    if (currentPath.startsWith("search://") || currentPath.startsWith("archive://")) {
+    if (currentPath.startsWith("search://")) {
+      return [
+        {
+          label: `Risultati Ricerca: "${currentPath.replace("search://", "")}"`,
+          target: currentPath,
+        },
+      ];
+    }
+    if (currentPath.startsWith("archive://")) {
       return [{ label: currentPath, target: currentPath }];
     }
     const normalized = currentPath.replace(/\//g, "\\");
@@ -148,6 +200,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
     index: number
   ) => {
     e.stopPropagation();
+    setCtxMenu(null);
     onActivate();
     setFocusedIndex(index);
 
@@ -185,12 +238,31 @@ export const FilePane: React.FC<FilePaneProps> = ({
     setLastClickedIndex(index);
   };
 
+  const handleContextMenu = (
+    e: React.MouseEvent,
+    entry: VfsEntry | null,
+    index?: number
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onActivate();
+    if (entry && !entry.isParent && !selectedPaths.has(entry.path)) {
+      onSelectionChange(new Set([entry.path]));
+      if (index !== undefined) setFocusedIndex(index);
+    }
+    setCtxMenu({
+      x: Math.min(e.clientX, window.innerWidth - 240),
+      y: Math.min(e.clientY, window.innerHeight - 260),
+      entry,
+    });
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (visibleEntries.length === 0) return;
 
     if (e.key === "ArrowDown" || e.key === "ArrowRight") {
       e.preventDefault();
-      const step = viewMode === "grid" && e.key === "ArrowDown" ? 3 : 1;
+      const step = viewMode === "grid" && e.key === "ArrowDown" ? 4 : 1;
       const nextIdx = Math.min(visibleEntries.length - 1, focusedIndex + step);
       setFocusedIndex(nextIdx);
       const target = visibleEntries[nextIdx];
@@ -199,7 +271,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
       }
     } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
       e.preventDefault();
-      const step = viewMode === "grid" && e.key === "ArrowUp" ? 3 : 1;
+      const step = viewMode === "grid" && e.key === "ArrowUp" ? 4 : 1;
       const nextIdx = Math.max(0, focusedIndex - step);
       setFocusedIndex(nextIdx);
       const target = visibleEntries[nextIdx];
@@ -214,9 +286,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
       }
     } else if (e.key === "Backspace") {
       e.preventDefault();
-      if (listing?.parentPath) {
-        onNavigate(listing.parentPath);
-      }
+      onUp();
     } else if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       const all = new Set<string>();
@@ -243,56 +313,15 @@ export const FilePane: React.FC<FilePaneProps> = ({
     return { selFiles, selDirs, selBytes };
   }, [visibleEntries, selectedPaths]);
 
-  const focusedEntry = visibleEntries[focusedIndex] || visibleEntries[0] || null;
-
   return (
     <section
       className={`file-pane ${isActive ? "active-pane" : ""}`}
-      onMouseDown={onActivate}
+      onMouseDown={() => {
+        setCtxMenu(null);
+        onActivate();
+      }}
     >
-      <div className="quick-volumes-bar">
-        {drives.map((drv) => (
-          <button
-            key={drv.mountPoint}
-            className={`quick-vol-pill ${
-              currentDrive?.mountPoint === drv.mountPoint ? "active" : ""
-            }`}
-            onClick={() => onNavigate(drv.mountPoint)}
-          >
-            <HardDrive size={12} />
-            <span>{drv.name}</span>
-          </button>
-        ))}
-        <button className="quick-vol-pill" onClick={() => onNavigate("C:\\Users")}>
-          <Globe size={12} color="#0284c7" />
-          <span>Users</span>
-        </button>
-        <button className="quick-vol-pill" onClick={() => onNavigate("C:\\Windows")}>
-          <Cpu size={12} color="#0284c7" />
-          <span>System</span>
-        </button>
-      </div>
-
-      <div className="drive-selector-bar">
-        <select
-          className="drive-select-combo"
-          value={currentDrive?.mountPoint || ""}
-          onChange={(e) => onNavigate(e.target.value)}
-        >
-          {drives.map((d) => (
-            <option key={d.mountPoint} value={d.mountPoint}>
-              {d.name}
-            </option>
-          ))}
-        </select>
-        {currentDrive && (
-          <span className="drive-free-text">
-            {formatGigabytes(currentDrive.availableSpace)} of{" "}
-            {formatGigabytes(currentDrive.totalSpace)} free
-          </span>
-        )}
-      </div>
-
+      {/* 1. Barra Schede Compatta */}
       <div className="pane-tab-bar">
         <div className="pane-tabs-scroll">
           {tabs.map((tab) => (
@@ -301,7 +330,9 @@ export const FilePane: React.FC<FilePaneProps> = ({
               className={`tab-item ${tab.id === activeTabId ? "active" : ""}`}
               onClick={() => onSelectTab(tab.id)}
             >
-              <span>{tab.title}</span>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                {tab.title}
+              </span>
               {tabs.length > 1 && (
                 <button
                   className="tab-close-btn"
@@ -322,65 +353,135 @@ export const FilePane: React.FC<FilePaneProps> = ({
         </button>
       </div>
 
-      <div className="breadcrumb-bar">
-        <div className="breadcrumb-segments">
-          {breadcrumbParts.map((part, idx) => (
-            <React.Fragment key={part.target + idx}>
-              {idx > 0 && <ChevronRight size={11} color="#8e8e93" />}
-              <button
-                className="crumb-btn"
-                onClick={() => onNavigate(part.target)}
-              >
-                {idx === 0 ? (
-                  <HardDrive size={12} color="#5c5c63" />
-                ) : (
-                  <Folder size={12} fill="#52baff" color="#268fd8" />
-                )}
-                <span>{part.label}</span>
-              </button>
-            </React.Fragment>
+      {/* 2. UNICA BARRA DI NAVIGAZIONE COMPATTA (Indietro/Avanti/Su + Unità con spazio libero + Breadcrumb) */}
+      <div className="pane-single-navbar">
+        <div className="pane-nav-group">
+          <button
+            className="pane-icon-btn"
+            disabled={!canGoBack}
+            onClick={onBack}
+            title="Indietro"
+          >
+            <ArrowLeft size={14} />
+          </button>
+          <button
+            className="pane-icon-btn"
+            disabled={!canGoForward}
+            onClick={onForward}
+            title="Avanti"
+          >
+            <ArrowRight size={14} />
+          </button>
+          <button
+            className="pane-icon-btn"
+            disabled={!listing?.parentPath}
+            onClick={onUp}
+            title="Cartella Superiore (Backspace)"
+          >
+            <ArrowUp size={14} />
+          </button>
+        </div>
+
+        {/* Dropdown compatto unità disco con spazio disponibile */}
+        <select
+          className="compact-drive-select"
+          value={currentDrive?.mountPoint || ""}
+          onChange={(e) => onNavigate(e.target.value)}
+          title={
+            currentDrive
+              ? `${currentDrive.name} - ${formatGigabytes(
+                  currentDrive.availableSpace
+                )} liberi su ${formatGigabytes(currentDrive.totalSpace)}`
+              : "Seleziona Unità"
+          }
+        >
+          {drives.map((d) => (
+            <option key={d.mountPoint} value={d.mountPoint}>
+              {d.mountPoint.replace("\\", "")} ({formatGigabytes(d.availableSpace)} free)
+            </option>
           ))}
+        </select>
+
+        {/* Breadcrumb cliccabile (doppio click o click sullo sfondo per digitare percorso) */}
+        <div
+          className="breadcrumb-box"
+          onDoubleClick={() => {
+            setPathInput(currentPath);
+            setEditingPath(true);
+          }}
+        >
+          {editingPath ? (
+            <input
+              className="path-direct-input"
+              value={pathInput}
+              autoFocus
+              onChange={(e) => setPathInput(e.target.value)}
+              onBlur={() => setEditingPath(false)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && pathInput.trim()) {
+                  setEditingPath(false);
+                  onNavigate(pathInput.trim());
+                } else if (e.key === "Escape") {
+                  setEditingPath(false);
+                }
+              }}
+            />
+          ) : (
+            breadcrumbParts.map((part, idx) => (
+              <React.Fragment key={part.target + idx}>
+                {idx > 0 && <ChevronRight size={12} color="var(--text-muted)" />}
+                <button
+                  className="crumb-btn"
+                  onClick={() => onNavigate(part.target)}
+                >
+                  {idx === 0 && <HardDrive size={12} color="var(--accent-color)" />}
+                  <span>{part.label}</span>
+                </button>
+              </React.Fragment>
+            ))
+          )}
         </div>
-        <div className="breadcrumb-actions">
-          <button
-            className="crumb-icon-btn"
-            onClick={() => onNavigate(currentPath)}
-            title="Ricarica percorso"
-          >
-            <AlignJustify size={13} />
-          </button>
-          <button
-            className="crumb-icon-btn"
-            onClick={() => onNavigate("C:\\")}
-            title="Vai alla radice disco"
-          >
-            <Star size={13} />
-          </button>
-        </div>
+
+        <button
+          className="pane-icon-btn"
+          onClick={() => onNavigate(currentPath)}
+          title="Aggiorna (F5)"
+        >
+          <RefreshCw size={13} />
+        </button>
       </div>
 
-      {viewMode === "grid" ? (
-        <div className="column-headers-bar grid-mode-headers">
-          {(
-            [
-              ["name", "name"],
-              ["extension", "extension"],
-              ["size", "size"],
-              ["modified", "modified"],
-              ["created", "created"],
-              ["modified", "added"],
-              ["kind", "kind"],
-            ] as [SortField, string][]
-          ).map(([field, label], i) => (
-            <div
-              key={label + i}
-              className="col-header-cell"
-              onClick={() => handleHeaderSort(field)}
-            >
-              <span>{label}</span>
-              {sortField === field && <span>{sortAsc ? "▲" : "▼"}</span>}
-            </div>
-          ))}
+      {/* 3. Intestazioni Colonne (in modalità Ricerca mostra la colonna Percorso) */}
+      {isSearchMode ? (
+        <div className="column-headers-bar search-columns">
+          <div
+            className="col-header-cell"
+            onClick={() => handleHeaderSort("name")}
+          >
+            <span>Nome</span>
+            {sortField === "name" && <span>{sortAsc ? "▲" : "▼"}</span>}
+          </div>
+          <div
+            className="col-header-cell"
+            onClick={() => handleHeaderSort("path")}
+          >
+            <span>Percorso</span>
+            {sortField === "path" && <span>{sortAsc ? "▲" : "▼"}</span>}
+          </div>
+          <div
+            className="col-header-cell"
+            onClick={() => handleHeaderSort("size")}
+          >
+            <span>Dimensione</span>
+            {sortField === "size" && <span>{sortAsc ? "▲" : "▼"}</span>}
+          </div>
+          <div
+            className="col-header-cell"
+            onClick={() => handleHeaderSort("modified")}
+          >
+            <span>Data modifica</span>
+            {sortField === "modified" && <span>{sortAsc ? "▲" : "▼"}</span>}
+          </div>
         </div>
       ) : (
         <div className="column-headers-bar">
@@ -388,47 +489,49 @@ export const FilePane: React.FC<FilePaneProps> = ({
             className="col-header-cell"
             onClick={() => handleHeaderSort("name")}
           >
-            <span>name</span>
+            <span>Nome</span>
             {sortField === "name" && <span>{sortAsc ? "▲" : "▼"}</span>}
           </div>
           <div
             className="col-header-cell"
             onClick={() => handleHeaderSort("extension")}
           >
-            <span>ext</span>
+            <span>Est.</span>
             {sortField === "extension" && <span>{sortAsc ? "▲" : "▼"}</span>}
           </div>
           <div
             className="col-header-cell"
             onClick={() => handleHeaderSort("size")}
           >
-            <span>size</span>
+            <span>Dimensione</span>
             {sortField === "size" && <span>{sortAsc ? "▲" : "▼"}</span>}
           </div>
           <div
             className="col-header-cell"
             onClick={() => handleHeaderSort("modified")}
           >
-            <span>modified</span>
+            <span>Data modifica</span>
             {sortField === "modified" && <span>{sortAsc ? "▲" : "▼"}</span>}
           </div>
           <div
             className="col-header-cell"
             onClick={() => handleHeaderSort("kind")}
           >
-            <span>kind</span>
+            <span>Tipo</span>
             {sortField === "kind" && <span>{sortAsc ? "▲" : "▼"}</span>}
           </div>
         </div>
       )}
 
+      {/* 4. Area Principale File (Lista / Griglia) */}
       <div
         ref={viewportRef}
         className="pane-entries-viewport"
         tabIndex={0}
         onKeyDown={handleKeyDown}
+        onContextMenu={(e) => handleContextMenu(e, null)}
       >
-        {viewMode === "grid" ? (
+        {viewMode === "grid" && !isSearchMode ? (
           <div className="entries-grid-container">
             {visibleEntries.map((entry, idx) => {
               const isSelected =
@@ -440,12 +543,9 @@ export const FilePane: React.FC<FilePaneProps> = ({
                   className={`grid-tile ${isSelected ? "selected" : ""}`}
                   onClick={(e) => handleEntryClick(e, entry, idx)}
                   onDoubleClick={() => onOpenEntry(entry)}
+                  onContextMenu={(e) => handleContextMenu(e, entry, idx)}
                 >
-                  <div
-                    className={`grid-tile-icon-wrap ${
-                      entry.isParent ? "is-parent-tile" : ""
-                    }`}
-                  >
+                  <div className="grid-tile-icon-wrap">
                     {renderGridArtwork(entry)}
                   </div>
                   <div className="grid-tile-label" title={entry.name}>
@@ -460,26 +560,55 @@ export const FilePane: React.FC<FilePaneProps> = ({
             {visibleEntries.map((entry, idx) => {
               const isSelected =
                 selectedPaths.has(entry.path) ||
-                (entry.isParent && focusedIndex === idx && selectedPaths.size === 0);
+                (entry.isParent &&
+                  focusedIndex === idx &&
+                  selectedPaths.size === 0);
               return (
                 <div
                   key={entry.path + idx}
-                  className={`list-row ${isSelected ? "selected" : ""} ${
-                    focusedIndex === idx ? "focused" : ""
-                  }`}
+                  className={`list-row ${isSearchMode ? "search-row" : ""} ${
+                    isSelected ? "selected" : ""
+                  } ${focusedIndex === idx ? "focused" : ""}`}
                   onClick={(e) => handleEntryClick(e, entry, idx)}
                   onDoubleClick={() => onOpenEntry(entry)}
+                  onContextMenu={(e) => handleContextMenu(e, entry, idx)}
                 >
-                  <div className="list-cell">
-                    {renderSmallIcon(entry, isSelected)}
-                    <span>{entry.isDir ? entry.name : entry.stem}</span>
-                  </div>
-                  <div className="list-cell">{entry.extension}</div>
-                  <div className="list-cell size-col">
-                    {entry.isDir ? "DIR" : formatBytesShort(entry.size)}
-                  </div>
-                  <div className="list-cell">{formatTimestamp(entry.modified)}</div>
-                  <div className="list-cell">{entry.kind}</div>
+                  {isSearchMode ? (
+                    <>
+                      <div className="list-cell" title={entry.name}>
+                        {renderSmallIcon(entry, isSelected)}
+                        <span>{entry.name}</span>
+                      </div>
+                      <div
+                        className="list-cell"
+                        title={entry.parentDir}
+                        style={{ opacity: 0.85 }}
+                      >
+                        {entry.parentDir}
+                      </div>
+                      <div className="list-cell size-col">
+                        {entry.isDir ? "DIR" : formatBytesShort(entry.size)}
+                      </div>
+                      <div className="list-cell">
+                        {formatTimestamp(entry.modified)}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="list-cell" title={entry.name}>
+                        {renderSmallIcon(entry, isSelected)}
+                        <span>{entry.isDir ? entry.name : entry.stem}</span>
+                      </div>
+                      <div className="list-cell">{entry.extension}</div>
+                      <div className="list-cell size-col">
+                        {entry.isDir ? "DIR" : formatBytesShort(entry.size)}
+                      </div>
+                      <div className="list-cell">
+                        {formatTimestamp(entry.modified)}
+                      </div>
+                      <div className="list-cell">{entry.kind}</div>
+                    </>
+                  )}
                 </div>
               );
             })}
@@ -487,45 +616,188 @@ export const FilePane: React.FC<FilePaneProps> = ({
         )}
       </div>
 
+      {/* 5. Menu Contestuale Tasto Destro */}
+      {ctxMenu && (
+        <div
+          className="context-menu-popup"
+          style={{ left: ctxMenu.x, top: ctxMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          {ctxMenu.entry && (
+            <>
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  const target = ctxMenu.entry!;
+                  setCtxMenu(null);
+                  onOpenEntry(target);
+                }}
+              >
+                <Folder size={14} />
+                <span>
+                  {ctxMenu.entry.isArchive
+                    ? "Naviga dentro l'archivio"
+                    : "Apri"}
+                </span>
+              </button>
+
+              {isSearchMode && ctxMenu.entry.parentDir && (
+                <button
+                  className="context-menu-item"
+                  onClick={() => {
+                    const dir = ctxMenu.entry!.parentDir;
+                    setCtxMenu(null);
+                    onNavigate(dir);
+                  }}
+                >
+                  <HardDrive size={14} />
+                  <span>Apri cartella contenitore</span>
+                </button>
+              )}
+
+              {ctxMenu.entry.isArchive && (
+                <>
+                  <div className="context-menu-sep" />
+                  <button
+                    className="context-menu-item"
+                    onClick={() => {
+                      const target = ctxMenu.entry!;
+                      setCtxMenu(null);
+                      onExtractHereRequest(target);
+                    }}
+                  >
+                    <FolderOutput size={14} />
+                    <span>Estrai qui</span>
+                  </button>
+                  <button
+                    className="context-menu-item"
+                    onClick={() => {
+                      const target = ctxMenu.entry!;
+                      setCtxMenu(null);
+                      onExtractToFolderRequest(target);
+                    }}
+                  >
+                    <FolderOutput size={14} />
+                    <span>Estrai in "{ctxMenu.entry.stem}\"...</span>
+                  </button>
+                </>
+              )}
+
+              <div className="context-menu-sep" />
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  setCtxMenu(null);
+                  onCompressRequest();
+                }}
+              >
+                <FileArchive size={14} />
+                <span>Comprimi in .7z / .zip...</span>
+              </button>
+
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  const target = ctxMenu.entry!;
+                  setCtxMenu(null);
+                  onRenameRequest(target);
+                }}
+              >
+                <Edit3 size={14} />
+                <span>Rinomina</span>
+              </button>
+
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  navigator.clipboard.writeText(ctxMenu.entry!.path);
+                  setCtxMenu(null);
+                }}
+              >
+                <Copy size={14} />
+                <span>Copia percorso completo</span>
+              </button>
+
+              <div className="context-menu-sep" />
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  setCtxMenu(null);
+                  onDeleteRequest();
+                }}
+              >
+                <Trash2 size={14} />
+                <span>Elimina (F8)</span>
+              </button>
+            </>
+          )}
+
+          {!ctxMenu.entry && (
+            <>
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  setCtxMenu(null);
+                  onNewFolderRequest();
+                }}
+              >
+                <FolderPlus size={14} />
+                <span>Nuova Cartella (F7)</span>
+              </button>
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  setCtxMenu(null);
+                  onNavigate(currentPath);
+                }}
+              >
+                <RefreshCw size={14} />
+                <span>Aggiorna vista</span>
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* 6. Status Bar del Pannello */}
       <footer className="pane-status-bar">
-        {viewMode === "grid" && focusedEntry ? (
-          <>
-            <span>{focusedEntry.name}</span>
-            <span>
-              {focusedEntry.isDir ? "DIR" : formatBytesShort(focusedEntry.size)}{" "}
-              {formatTimestampWithSeconds(focusedEntry.modified)}
-            </span>
-          </>
-        ) : (
-          <span style={{ margin: "0 auto" }}>
-            {formatBytesShort(selectionStats.selBytes)} /{" "}
-            {formatBytesShort(listing?.totalBytes || 0)} in{" "}
-            {selectionStats.selFiles} / {listing?.totalFiles || 0} file(s),{" "}
-            {selectionStats.selDirs} / {listing?.totalDirs || 0} dir(s)
-          </span>
-        )}
+        <span>
+          Selezionati: {selectionStats.selFiles} file, {selectionStats.selDirs}{" "}
+          cartelle ({formatBytesShort(selectionStats.selBytes)})
+        </span>
+        <span>
+          Totale: {listing?.totalFiles || 0} file, {listing?.totalDirs || 0}{" "}
+          cartelle ({formatBytesShort(listing?.totalBytes || 0)})
+        </span>
       </footer>
     </section>
   );
 };
 
 function renderSmallIcon(entry: VfsEntry, isSelected: boolean) {
-  const color = isSelected ? "#ffffff" : "#268fd8";
+  const color = isSelected ? "#ffffff" : "var(--accent-color)";
   if (entry.isDir) {
-    return <Folder size={14} fill={isSelected ? "#76d0ff" : "#52baff"} color={color} />;
+    return (
+      <Folder
+        size={15}
+        fill={isSelected ? "#ffffff" : "var(--folder-icon-bottom)"}
+        color={isSelected ? "#ffffff" : "var(--folder-icon-glyph)"}
+      />
+    );
   }
-  if (entry.isArchive) return <FileArchive size={14} color={isSelected ? "#fff" : "#d97706"} />;
+  if (entry.isArchive)
+    return <FileArchive size={15} color={isSelected ? "#fff" : "#d97706"} />;
   switch (entry.kind) {
     case "image":
-      return <ImageIcon size={14} color={isSelected ? "#fff" : "#10b981"} />;
+      return <ImageIcon size={15} color={isSelected ? "#fff" : "#10b981"} />;
     case "video":
-      return <Film size={14} color={isSelected ? "#fff" : "#8b5cf6"} />;
+      return <Film size={15} color={isSelected ? "#fff" : "#8b5cf6"} />;
     case "audio":
-      return <Music size={14} color={isSelected ? "#fff" : "#ec4899"} />;
+      return <Music size={15} color={isSelected ? "#fff" : "#ec4899"} />;
     case "code":
-      return <Code size={14} color={isSelected ? "#fff" : "#0284c7"} />;
+      return <Code size={15} color={isSelected ? "#fff" : color} />;
     default:
-      return <FileText size={14} color={isSelected ? "#fff" : "#64748b"} />;
+      return <FileText size={15} color={isSelected ? "#fff" : "#64748b"} />;
   }
 }
 
@@ -545,42 +817,21 @@ function renderGridArtwork(entry: VfsEntry) {
           rx="6"
           fill="var(--folder-icon-bottom)"
         />
-        <rect
-          x="6"
-          y="18"
-          width="60"
-          height="3"
-          rx="1.5"
-          fill="rgba(255,255,255,0.45)"
-        />
       </svg>
     );
   }
-
-  if (entry.kind === "image") {
-    return (
-      <div className="photo-frame-preview">
-        <div className="photo-frame-art">
-          <ImageIcon size={20} />
-        </div>
-      </div>
-    );
-  }
-
-  if (entry.isArchive) {
-    return <FileArchive size={44} color="#d97706" />;
-  }
-
-  return <FileText size={44} color="#3b82f6" />;
+  if (entry.isArchive) return <FileArchive size={42} color="#d97706" />;
+  if (entry.kind === "image") return <ImageIcon size={42} color="#10b981" />;
+  return <FileText size={42} color="var(--accent-color)" />;
 }
 
 function formatGigabytes(bytes: number): string {
   const gb = bytes / (1024 * 1024 * 1024);
-  return `${gb.toFixed(2).replace(".", ",")} GB`;
+  return `${gb.toFixed(1).replace(".", ",")} GB`;
 }
 
 function formatBytesShort(bytes: number): string {
-  if (bytes === 0) return "0 bytes";
+  if (bytes === 0) return "0 B";
   if (bytes < 1024) return `${bytes} B`;
   const kb = bytes / 1024;
   if (kb < 1024) return `${kb.toFixed(1)} KB`;
@@ -594,16 +845,7 @@ function formatTimestamp(unixSecs: number): string {
   if (!unixSecs) return "--";
   const d = new Date(unixSecs * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}, ${pad(
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(
     d.getHours()
   )}:${pad(d.getMinutes())}`;
-}
-
-function formatTimestampWithSeconds(unixSecs: number): string {
-  if (!unixSecs) return "";
-  const d = new Date(unixSecs * 1000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}, ${pad(
-    d.getHours()
-  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }

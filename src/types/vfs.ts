@@ -1,12 +1,21 @@
 export type ViewMode = "list" | "columns" | "grid";
+export type LayoutMode = "single" | "dual";
 
-export type SortField = "name" | "extension" | "size" | "modified" | "created" | "kind";
+export type SortField =
+  | "name"
+  | "path"
+  | "extension"
+  | "size"
+  | "modified"
+  | "created"
+  | "kind";
 
 export interface VfsEntry {
   name: string;
   stem: string;
   extension: string;
   path: string;
+  parentDir: string;
   isDir: boolean;
   isParent: boolean;
   isArchive: boolean;
@@ -68,5 +77,7 @@ export interface EngineStatus {
   everythingVersion: string | null;
   activeSearchEngine: string;
   archiveDllLoaded: boolean;
+  archiveLoadedPath: string | null;
   archiveFormatsCount: number;
+  archiveLoadDiagnostics: string[];
 }

@@ -19,14 +19,19 @@ pub fn run() {
         .manage(AppState { vfs: vfs_manager })
         .invoke_handler(tauri::generate_handler![
             list_drives,
+            get_startup_paths,
             read_vfs_directory,
             create_directory,
+            rename_item,
             delete_items,
             copy_items,
             move_items,
             read_file_preview,
             execute_search,
             get_engine_status,
+            reload_archive_engine,
+            compress_Selection,
+            extract_archive,
             open_in_terminal,
         ])
         .run(tauri::generate_context!())

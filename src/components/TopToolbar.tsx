@@ -1,86 +1,79 @@
 import React from "react";
 import {
-  ChevronLeft,
-  ChevronRight,
   AlignJustify,
-  List,
-  LayoutGrid,
-  Info,
+  Columns,
   Eye,
-  Search,
   FileArchive,
+  FolderOutput,
   FolderPlus,
+  Info,
+  LayoutGrid,
+  List,
+  Palette,
+  Search,
+  Square,
   Terminal,
-  ArrowDownCircle,
-  HardDrive,
+  X,
 } from "lucide-react";
-import { EngineStatus, ViewMode } from "../types/vfs";
-import { useTheme } from "../themes/ThemeContext";
+import { EngineStatus, LayoutMode, ViewMode } from "../types/vfs";
 
 interface TopToolbarProps {
-  activeGlobalPath: string;
-  canGoBack: boolean;
-  canGoForward: boolean;
-  onBack: () => void;
-  onForward: () => void;
+  layoutMode: LayoutMode;
+  onToggleLayoutMode: () => void;
   activeViewMode: ViewMode;
   onChangeViewMode: (mode: ViewMode) => void;
   showHidden: boolean;
   onToggleHidden: () => void;
-  onOpenSearch: () => void;
-  onQuickView: () => void;
+  searchQuery: string;
+  onSearchQueryChange: (q: string) => void;
+  onTriggerInstantSearch: (q: string) => void;
+  onClearSearch: () => void;
+  searchScopeGlobal: boolean;
+  onToggleSearchScope: () => void;
+  onOpenCompressModal: () => void;
+  onExtractSelected: () => void;
   onNewFolder: () => void;
   onOpenTerminal: () => void;
-  onArchiveAction: () => void;
+  onOpenDiagnostics: () => void;
+  onOpenThemeModal: () => void;
   engineStatus: EngineStatus | null;
 }
 
 export const TopToolbar: React.FC<TopToolbarProps> = ({
-  activeGlobalPath,
-  canGoBack,
-  canGoForward,
-  onBack,
-  onForward,
+  layoutMode,
+  onToggleLayoutMode,
   activeViewMode,
   onChangeViewMode,
   showHidden,
   onToggleHidden,
-  onOpenSearch,
-  onQuickView,
+  searchQuery,
+  onSearchQueryChange,
+  onTriggerInstantSearch,
+  onClearSearch,
+  searchScopeGlobal,
+  onToggleSearchScope,
+  onOpenCompressModal,
+  onExtractSelected,
   onNewFolder,
   onOpenTerminal,
-  onArchiveAction,
+  onOpenDiagnostics,
+  onOpenThemeModal,
   engineStatus,
 }) => {
-  const { themeId, toggleTheme } = useTheme();
-
   return (
     <header className="top-toolbar">
       <div className="toolbar-left">
+        {/* Toggle Vista Singola / Doppia Vista */}
         <button
-          className="toolbar-nav-btn"
-          disabled={!canGoBack}
-          onClick={onBack}
-          title="Indietro (Alt+Left)"
+          className="toolbar-btn active"
+          onClick={onToggleLayoutMode}
+          title="Passa tra Vista Singola (1 Pannello) e Doppia Vista (2 Pannelli)"
         >
-          <ChevronLeft size={16} />
-        </button>
-        <button
-          className="toolbar-nav-btn"
-          disabled={!canGoForward}
-          onClick={onForward}
-          title="Avanti (Alt+Right)"
-        >
-          <ChevronRight size={16} />
+          {layoutMode === "dual" ? <Columns size={15} /> : <Square size={15} />}
+          <span>{layoutMode === "dual" ? "2 Pannelli" : "1 Pannello"}</span>
         </button>
 
-        <div className="toolbar-global-title" title={activeGlobalPath}>
-          <HardDrive size={14} color="#0066cc" />
-          <span>{activeGlobalPath}</span>
-        </div>
-      </div>
-
-      <div className="toolbar-right">
+        {/* Selettore Modalità Vista */}
         <div className="toolbar-view-group" role="group" aria-label="View Mode">
           <button
             className={activeViewMode === "list" ? "active" : ""}
@@ -99,58 +92,73 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           <button
             className={activeViewMode === "grid" ? "active" : ""}
             onClick={() => onChangeViewMode("grid")}
-            title="Vista Griglia Icone e Miniature"
+            title="Vista Griglia Icone"
           >
             <LayoutGrid size={14} />
           </button>
         </div>
+      </div>
 
+      {/* BARRA DI RICERCA ISTANTANEA EVERYTHING (Zero popup nascosti) */}
+      <div className="instant-search-bar">
+        <Search size={14} color="var(--accent-color)" />
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => onSearchQueryChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              onTriggerInstantSearch(searchQuery);
+            } else if (e.key === "Escape") {
+              onClearSearch();
+            }
+          }}
+          placeholder={
+            engineStatus?.everythingServiceConnected
+              ? "Cerca istantaneamente con Everything (es. ciao, ext:zip;7z)..."
+              : "Cerca file nel pannello attivo..."
+          }
+        />
+        {searchQuery && (
+          <button
+            className="tab-close-btn"
+            onClick={onClearSearch}
+            title="Pulisci ricerca e torna alla cartella"
+          >
+            <X size={14} />
+          </button>
+        )}
         <button
-          className={`theme-pill-switch ${themeId === "frutiger-aero" ? "aero" : ""}`}
-          onClick={toggleTheme}
-          title={`Tema attivo: ${themeId}. Clicca per cambiare in ${
-            themeId === "commander-light" ? "Frutiger Aero" : "Commander Light"
-          }`}
+          type="button"
+          className={`search-scope-chip ${searchScopeGlobal ? "active" : ""}`}
+          onClick={onToggleSearchScope}
+          title="Cambia ambito: Tutto il PC (Everything) oppure Cartella corrente"
         >
-          <span className="theme-pill-knob" />
+          {searchScopeGlobal ? "Tutto il PC" : "Cartella"}
         </button>
+      </div>
 
+      <div className="toolbar-right">
         <button
-          className="toolbar-action-btn"
-          onClick={onQuickView}
-          title="Informazioni / Anteprima Rapida (F3)"
-        >
-          <Info size={15} />
-        </button>
-
-        <button
-          className={`toolbar-action-btn ${showHidden ? "active" : ""}`}
-          onClick={onToggleHidden}
-          title="Mostra/Nascondi file nascosti"
-        >
-          <Eye size={15} />
-        </button>
-
-        <button
-          className="toolbar-action-btn"
-          onClick={onOpenSearch}
-          title={`Ricerca Dual-Engine (${
-            engineStatus?.everythingServiceConnected ? "Everything SDK3" : "Rust Fallback"
-          }) - Ctrl+F`}
-        >
-          <Search size={15} />
-        </button>
-
-        <button
-          className="toolbar-action-btn highlight-zip"
-          onClick={onArchiveAction}
-          title="KZip.Core.dll COM Archive Manager (Comprimi / Apri Archivio)"
+          className="toolbar-btn primary-accent"
+          onClick={onOpenCompressModal}
+          title="Comprimi elementi selezionati in .7z / .zip"
         >
           <FileArchive size={15} />
+          <span>Comprimi</span>
         </button>
 
         <button
-          className="toolbar-action-btn"
+          className="toolbar-btn"
+          onClick={onExtractSelected}
+          title="Estrai archivio selezionato"
+        >
+          <FolderOutput size={15} />
+          <span>Estrai</span>
+        </button>
+
+        <button
+          className="toolbar-btn"
           onClick={onNewFolder}
           title="Nuova Cartella (F7)"
         >
@@ -158,7 +166,15 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         </button>
 
         <button
-          className="toolbar-action-btn"
+          className={`toolbar-btn ${showHidden ? "active" : ""}`}
+          onClick={onToggleHidden}
+          title="Mostra/Nascondi file nascosti"
+        >
+          <Eye size={15} />
+        </button>
+
+        <button
+          className="toolbar-btn"
           onClick={onOpenTerminal}
           title="Apri Terminale nel percorso attivo"
         >
@@ -166,11 +182,20 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         </button>
 
         <button
-          className="toolbar-action-btn"
-          onClick={onQuickView}
-          title="Coda Trasferimenti / Stato Motori FFI"
+          className="toolbar-btn"
+          onClick={onOpenDiagnostics}
+          title="Diagnostica Motori FFI / Anteprima F3"
         >
-          <ArrowDownCircle size={15} />
+          <Info size={15} />
+        </button>
+
+        <button
+          className="toolbar-btn"
+          onClick={onOpenThemeModal}
+          title="Selettore Temi e Personalizzazione JSON"
+        >
+          <Palette size={15} />
+          <span>Temi</span>
         </button>
       </div>
     </header>

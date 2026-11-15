@@ -11,6 +11,21 @@ impl LocalFsProvider {
         Self
     }
 
+    pub fn default_home_or_c() -> String {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            let p = PathBuf::from(&profile);
+            if p.is_dir() {
+                return profile;
+            }
+        }
+        if Path::new("C:\\").is_dir() {
+            return "C:\\".to_string();
+        }
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "C:\\".to_string())
+    }
+
     pub fn list_drives(&self) -> Vec<DriveInfo> {
         let disks = Disks::new_with_refreshed_list();
         let mut drives = Vec::new();
@@ -18,10 +33,11 @@ impl LocalFsProvider {
         for disk in disks.list() {
             let mount_point = disk.mount_point().to_string_lossy().to_string();
             let raw_name = disk.name().to_string_lossy().to_string();
+            let letter = mount_point.trim_end_matches('\\');
             let display_name = if raw_name.trim().is_empty() {
-                format!("Local Disk ({})", mount_point.trim_end_matches('\\'))
+                format!("Disco Locale ({})", letter)
             } else {
-                format!("{} ({})", raw_name, mount_point.trim_end_matches('\\'))
+                format!("{} ({})", raw_name, letter)
             };
 
             drives.push(DriveInfo {
@@ -33,6 +49,17 @@ impl LocalFsProvider {
                 is_removable: disk.is_removable(),
             });
         }
+
+        // Ordina sempre C:\ per primo, poi in ordine alfabetico per lettera di unità
+        drives.sort_by(|a, b| {
+            let a_is_c = a.mount_point.eq_ignore_ascii_case("C:\\");
+            let b_is_c = b.mount_point.eq_ignore_ascii_case("C:\\");
+            match (a_is_c, b_is_c) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.mount_point.cmp(&b.mount_point),
+            }
+        });
 
         if drives.is_empty() {
             drives.push(DriveInfo {
@@ -55,6 +82,11 @@ impl LocalFsProvider {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
+
+        let parent_dir = path
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
 
         let (stem, extension) = if is_dir {
             (file_name.clone(), String::new())
@@ -101,6 +133,7 @@ impl LocalFsProvider {
             stem,
             extension,
             path: path_str,
+            parent_dir,
             is_dir,
             is_parent: false,
             is_archive,
@@ -141,7 +174,7 @@ impl VfsProvider for LocalFsProvider {
 
     fn list_directory(&self, raw_path: &str) -> Result<DirectoryListing, String> {
         let target_path = if raw_path.trim().is_empty() {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("C:\\"))
+            PathBuf::from(Self::default_home_or_c())
         } else {
             PathBuf::from(raw_path)
         };
@@ -171,6 +204,7 @@ impl VfsProvider for LocalFsProvider {
                 stem: "..".to_string(),
                 extension: String::new(),
                 path: parent.clone(),
+                parent_dir: parent.clone(),
                 is_dir: true,
                 is_parent: true,
                 is_archive: false,
