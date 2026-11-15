@@ -1,11 +1,10 @@
-pub mod everything_ffi;
+pub mod everything_ipc;
 pub mod fallback;
 
 use crate::vfs::VfsEntry;
-use everything_ffi::EverythingSdk3Engine;
+use everything_ipc::EverythingPureRustClient;
 use fallback::FallbackRustSearchEngine;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,28 +41,26 @@ pub struct EngineStatus {
 }
 
 pub struct DualSearchCoordinator {
-    everything: Option<Arc<EverythingSdk3Engine>>,
+    client: EverythingPureRustClient,
 }
 
 impl DualSearchCoordinator {
     pub fn new() -> Self {
         Self {
-            everything: EverythingSdk3Engine::try_load(),
+            client: EverythingPureRustClient::new(),
         }
     }
 
     pub fn execute(&self, params: &SearchQuery) -> SearchResponse {
         let start = Instant::now();
 
-        if let Some(ref ev) = self.everything {
-            if let Ok(results) = ev.search(params) {
-                return SearchResponse {
-                    engine_used: "Everything SDK3 (KZip.Search.dll)".to_string(),
-                    elapsed_ms: start.elapsed().as_millis(),
-                    vfs_uri: format!("search://{}", params.query),
-                    results,
-                };
-            }
+        if let Ok(results) = self.client.search(params) {
+            return SearchResponse {
+                engine_used: "Everything 1.5 Pure-Rust IPC/Pipe Client".to_string(),
+                elapsed_ms: start.elapsed().as_millis(),
+                vfs_uri: format!("search://{}", params.query),
+                results,
+            };
         }
 
         let results = FallbackRustSearchEngine::search(params);
@@ -76,35 +73,23 @@ impl DualSearchCoordinator {
     }
 
     pub fn probe_status(&self, archive_loaded: bool, archive_formats: u32) -> EngineStatus {
-        if let Some(ref ev) = self.everything {
-            if let Some(version) = ev.probe_connection_version() {
-                return EngineStatus {
-                    everything_dll_loaded: true,
-                    everything_service_connected: true,
-                    everything_version: Some(version),
-                    active_search_engine: "Everything 1.5 SDK3 (Realtime)".to_string(),
-                    archive_dll_loaded: archive_loaded,
-                    archive_formats_count: archive_formats,
-                };
-            } else {
-                return EngineStatus {
-                    everything_dll_loaded: true,
-                    everything_service_connected: false,
-                    everything_version: None,
-                    active_search_engine: "Rust Fallback (Everything IPC non attivo)".to_string(),
-                    archive_dll_loaded: archive_loaded,
-                    archive_formats_count: archive_formats,
-                };
-            }
-        }
-
-        EngineStatus {
-            everything_dll_loaded: false,
-            everything_service_connected: false,
-            everything_version: None,
-            active_search_engine: "Rust Parallel Engine (ignore + regex)".to_string(),
-            archive_dll_loaded: archive_loaded,
-            archive_formats_count: archive_formats,
+        match self.client.probe_status() {
+            Some(version) => EngineStatus {
+                everything_dll_loaded: true,
+                everything_service_connected: true,
+                everything_version: Some(version),
+                active_search_engine: "Everything 1.5 Native Pipe/IPC (Pure Rust)".to_string(),
+                archive_dll_loaded: archive_loaded,
+                archive_formats_count: archive_formats,
+            },
+            None => EngineStatus {
+                everything_dll_loaded: false,
+                everything_service_connected: false,
+                everything_version: None,
+                active_search_engine: "Pure-Rust Parallel Fallback (ignore + regex)".to_string(),
+                archive_dll_loaded: archive_loaded,
+                archive_formats_count: archive_formats,
+            },
         }
     }
 }
