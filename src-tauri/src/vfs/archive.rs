@@ -1,7 +1,7 @@
 use super::local::LocalFsProvider;
 use super::{DirectoryListing, VfsEntry, VfsManager, VfsProvider};
 use libloading::os::windows::Library as WinLibrary;
-use libloading::{Library, Symbol};
+use libloading::Library;
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::fs::{self, File};
@@ -67,13 +67,6 @@ pub const IID_IOUTSTREAM: GUID = GUID {
     Data2: 0x40C1,
     Data3: 0x278A,
     Data4: [0x00, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00],
-};
-
-pub const IID_ISTREAMGETSIZE: GUID = GUID {
-    Data1: 0x23170F69,
-    Data2: 0x40C1,
-    Data3: 0x278A,
-    Data4: [0x00, 0x00, 0x00, 0x03, 0x00, 0x06, 0x00, 0x00],
 };
 
 pub const IID_IINARCHIVE: GUID = GUID {
@@ -297,11 +290,15 @@ unsafe extern "system" fn file_in_stream_qi(
 }
 
 unsafe extern "system" fn file_in_stream_add_ref(this: *mut ComFileInStream) -> ULONG {
-    (*this).ref_count.fetch_add(1, Ordering::Relaxed) + 1
+    let this_ref = &*this;
+    this_ref.ref_count.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 unsafe extern "system" fn file_in_stream_release(this: *mut ComFileInStream) -> ULONG {
-    let prev = (*this).ref_count.fetch_sub(1, Ordering::Release);
+    let prev = {
+        let this_ref = &*this;
+        this_ref.ref_count.fetch_sub(1, Ordering::Release)
+    };
     if prev == 1 {
         std::sync::atomic::fence(Ordering::Acquire);
         drop(Box::from_raw(this));
@@ -324,7 +321,8 @@ unsafe extern "system" fn file_in_stream_read(
         return S_OK;
     }
     let buf = std::slice::from_raw_parts_mut(data as *mut u8, size as usize);
-    match (*this).file.read(buf) {
+    let this_mut = &mut *this;
+    match this_mut.file.read(buf) {
         Ok(n) => {
             if !processed_size.is_null() {
                 *processed_size = n as u32;
@@ -347,7 +345,8 @@ unsafe extern "system" fn file_in_stream_seek(
         2 => SeekFrom::End(offset),
         _ => return E_FAIL,
     };
-    match (*this).file.seek(pos) {
+    let this_mut = &mut *this;
+    match this_mut.file.seek(pos) {
         Ok(new_pos) => {
             if !new_position.is_null() {
                 *new_position = new_pos;
@@ -441,11 +440,15 @@ unsafe extern "system" fn file_out_stream_qi(
 }
 
 unsafe extern "system" fn file_out_stream_add_ref(this: *mut ComFileOutStream) -> ULONG {
-    (*this).ref_count.fetch_add(1, Ordering::Relaxed) + 1
+    let this_ref = &*this;
+    this_ref.ref_count.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 unsafe extern "system" fn file_out_stream_release(this: *mut ComFileOutStream) -> ULONG {
-    let prev = (*this).ref_count.fetch_sub(1, Ordering::Release);
+    let prev = {
+        let this_ref = &*this;
+        this_ref.ref_count.fetch_sub(1, Ordering::Release)
+    };
     if prev == 1 {
         std::sync::atomic::fence(Ordering::Acquire);
         drop(Box::from_raw(this));
@@ -468,7 +471,8 @@ unsafe extern "system" fn file_out_stream_write(
         return S_OK;
     }
     let slice = std::slice::from_raw_parts(data as *const u8, size as usize);
-    match (*this).file.write(slice) {
+    let this_mut = &mut *this;
+    match this_mut.file.write(slice) {
         Ok(n) => {
             if !processed_size.is_null() {
                 *processed_size = n as u32;
@@ -491,7 +495,8 @@ unsafe extern "system" fn file_out_stream_seek(
         2 => SeekFrom::End(offset),
         _ => return E_FAIL,
     };
-    match (*this).file.seek(pos) {
+    let this_mut = &mut *this;
+    match this_mut.file.seek(pos) {
         Ok(p) => {
             if !new_position.is_null() {
                 *new_position = p;
@@ -506,7 +511,8 @@ unsafe extern "system" fn file_out_stream_set_size(
     this: *mut ComFileOutStream,
     new_size: u64,
 ) -> HRESULT {
-    match (*this).file.set_len(new_size) {
+    let this_mut = &mut *this;
+    match this_mut.file.set_len(new_size) {
         Ok(_) => S_OK,
         Err(_) => E_FAIL,
     }
@@ -592,11 +598,15 @@ unsafe extern "system" fn extract_cb_qi(
 }
 
 unsafe extern "system" fn extract_cb_add_ref(this: *mut ComExtractCallback) -> ULONG {
-    (*this).ref_count.fetch_add(1, Ordering::Relaxed) + 1
+    let this_ref = &*this;
+    this_ref.ref_count.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 unsafe extern "system" fn extract_cb_release(this: *mut ComExtractCallback) -> ULONG {
-    let prev = (*this).ref_count.fetch_sub(1, Ordering::Release);
+    let prev = {
+        let this_ref = &*this;
+        this_ref.ref_count.fetch_sub(1, Ordering::Release)
+    };
     if prev == 1 {
         std::sync::atomic::fence(Ordering::Acquire);
         drop(Box::from_raw(this));
@@ -630,17 +640,17 @@ unsafe extern "system" fn extract_cb_get_stream(
         return E_FAIL;
     }
     *out_stream = null_mut();
-    // ask_extract_mode == 0 significa kExtract
     if ask_extract_mode != 0 {
         return S_OK;
     }
 
-    let archive = (*this).in_archive;
+    let this_ref = &*this;
+    let archive = this_ref.in_archive;
     let rel_path = read_archive_item_string(archive, index, KP_ID_PATH).unwrap_or_default();
     let is_dir = read_archive_item_bool(archive, index, KP_ID_IS_DIR);
 
     let sanitized = rel_path.replace('/', "\\").trim_start_matches('\\').to_string();
-    let full_target = (*this).dest_dir.join(sanitized);
+    let full_target = this_ref.dest_dir.join(sanitized);
 
     if is_dir {
         let _ = fs::create_dir_all(&full_target);
@@ -768,11 +778,15 @@ unsafe extern "system" fn update_cb_qi(
 }
 
 unsafe extern "system" fn update_cb_add_ref(this: *mut ComUpdateCallback) -> ULONG {
-    (*this).ref_count.fetch_add(1, Ordering::Relaxed) + 1
+    let this_ref = &*this;
+    this_ref.ref_count.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 unsafe extern "system" fn update_cb_release(this: *mut ComUpdateCallback) -> ULONG {
-    let prev = (*this).ref_count.fetch_sub(1, Ordering::Release);
+    let prev = {
+        let this_ref = &*this;
+        this_ref.ref_count.fetch_sub(1, Ordering::Release)
+    };
     if prev == 1 {
         std::sync::atomic::fence(Ordering::Acquire);
         drop(Box::from_raw(this));
@@ -826,7 +840,8 @@ unsafe extern "system" fn update_cb_get_property(
     }
     std::ptr::write_bytes(value, 0, 1);
 
-    let item = match (*this).items.get(index as usize) {
+    let this_ref = &*this;
+    let item = match this_ref.items.get(index as usize) {
         Some(it) => it,
         None => return E_FAIL,
     };
@@ -874,7 +889,8 @@ unsafe extern "system" fn update_cb_get_stream(
         return E_FAIL;
     }
     *in_stream = null_mut();
-    let item = match (*this).items.get(index as usize) {
+    let this_ref = &*this;
+    let item = match this_ref.items.get(index as usize) {
         Some(it) => it,
         None => return E_FAIL,
     };
@@ -931,7 +947,7 @@ impl KZipCoreLibrary {
 
             let wide_path: Vec<u16> = dll_path
                 .as_os_str()
-                .encode_wide_Compat()
+                .encode_wide_compat()
                 .into_iter()
                 .chain(std::iter::once(0))
                 .collect();
@@ -984,7 +1000,7 @@ impl KZipCoreLibrary {
                                 {
                                     let w_codec: Vec<u16> = cp
                                         .as_os_str()
-                                        .encode_wide_Compat()
+                                        .encode_wide_compat()
                                         .into_iter()
                                         .chain(std::iter::once(0))
                                         .collect();
@@ -1040,7 +1056,6 @@ impl KZipCoreLibrary {
         let mut paths = Vec::new();
         let dll_names = ["KZip.Core.dll", "NanaZip.Core.dll", "7z.dll"];
 
-        // 1) Accanto a std::env::current_exe() e 2) in current_exe()/binaries/
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
                 for name in dll_names {
@@ -1051,7 +1066,6 @@ impl KZipCoreLibrary {
             }
         }
 
-        // 3) In CARGO_MANIFEST_DIR/binaries/ (per tauri dev)
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         for name in dll_names {
             paths.push(manifest_dir.join("binaries").join(name));
@@ -1059,7 +1073,6 @@ impl KZipCoreLibrary {
             paths.push(manifest_dir.join(name));
         }
 
-        // Dedup preservando l'ordine di priorità
         let mut seen = HashSet::new();
         paths
             .into_iter()
@@ -1081,11 +1094,11 @@ impl KZipCoreLibrary {
 }
 
 trait OsStrWideCompat {
-    fn encode_wide_Compat(&self) -> Vec<u16>;
+    fn encode_wide_compat(&self) -> Vec<u16>;
 }
 
 impl OsStrWideCompat for std::ffi::OsStr {
-    fn encode_wide_Compat(&self) -> Vec<u16> {
+    fn encode_wide_compat(&self) -> Vec<u16> {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::ffi::OsStrExt;
@@ -1176,7 +1189,7 @@ impl ArchiveVfsProvider {
             0x07,
             0x01,
             0x03,
-            0xCC, // RAR5
+            0xCC,
             0xEE,
             0xEF,
             0x0C,
@@ -1207,7 +1220,7 @@ impl ArchiveVfsProvider {
                 }
             };
 
-            let max_check: u64 = 1 << 22; // 4 MB scan window
+            let max_check: u64 = 1 << 22;
             let open_hr = ((*(*in_archive).lp_vtbl).open)(
                 in_archive,
                 stream_ptr as *mut c_void,
@@ -1458,7 +1471,7 @@ impl VfsProvider for ArchiveVfsProvider {
                 format!("{}/", clean_inner)
             };
 
-            let mut seen_Synthetic_dirs = HashSet::new();
+            let mut seen_synthetic_dirs = HashSet::new();
             let mut items = Vec::new();
 
             for idx in 0..num_items {
@@ -1484,8 +1497,7 @@ impl VfsProvider for ArchiveVfsProvider {
                 }
 
                 if let Some((first_seg, _rest)) = remainder.split_once('/') {
-                    // Cartella intermedia (esplicita o implicita)
-                    if seen_Synthetic_dirs.insert(first_seg.to_string()) {
+                    if seen_synthetic_dirs.insert(first_seg.to_string()) {
                         let sub_uri = if clean_inner.is_empty() {
                             format!("archive://{}!/{}", archive_file, first_seg)
                         } else {
@@ -1509,13 +1521,12 @@ impl VfsProvider for ArchiveVfsProvider {
                         });
                     }
                 } else {
-                    // Elemento figlio diretto del livello corrente
                     let is_dir = read_archive_item_bool(in_archive, idx, KP_ID_IS_DIR);
                     let size = read_archive_item_u64(in_archive, idx, KP_ID_SIZE);
                     let mtime_ft = read_archive_item_u64(in_archive, idx, KP_ID_MTIME);
                     let modified = filetime_to_unix_seconds(mtime_ft);
 
-                    if is_dir && !seen_Synthetic_dirs.insert(remainder.to_string()) {
+                    if is_dir && !seen_synthetic_dirs.insert(remainder.to_string()) {
                         continue;
                     }
 
@@ -1535,13 +1546,7 @@ impl VfsProvider for ArchiveVfsProvider {
                         (st, ext)
                     };
 
-                    let entry_uri = if is_dir {
-                        if clean_inner.is_empty() {
-                            format!("archive://{}!/{}", archive_file, name)
-                        } else {
-                            format!("archive://{}!/{}/{}", archive_file, clean_inner, name)
-                        }
-                    } else if clean_inner.is_empty() {
+                    let entry_uri = if clean_inner.is_empty() {
                         format!("archive://{}!/{}", archive_file, name)
                     } else {
                         format!("archive://{}!/{}/{}", archive_file, clean_inner, name)

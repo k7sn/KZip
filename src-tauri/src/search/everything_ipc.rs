@@ -808,8 +808,9 @@ unsafe extern "system" fn ipc_receiver_wndproc(
             if !user_ptr.is_null() {
                 let slice =
                     std::slice::from_raw_parts(cds.lpData as *const u8, cds.cbData as usize);
-                (*user_ptr).clear();
-                (*user_ptr).extend_from_slice(slice);
+                let user_vec = &mut *user_ptr;
+                user_vec.clear();
+                user_vec.extend_from_slice(slice);
                 return 1;
             }
         }
